@@ -1,0 +1,18 @@
+name: miri
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"
+
+jobs:
+  miri-sdk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Miri on extension-sdk-mongodb (Docker)
+        run: |
+          chmod +x e2e-tests/run-miri-docker.sh
+          ./e2e-tests/run-miri-docker.sh

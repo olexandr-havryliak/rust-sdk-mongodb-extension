@@ -1,0 +1,17 @@
+[package]
+name = "mongo_extension_fuzz"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "E2E fuzz driver: random aggregation pipelines against a live mongod (extensions)"
+
+[[bin]]
+name = "mongo_extension_fuzz"
+path = "src/main.rs"
+
+[dependencies]
+bson = "2.15"
+futures = "0.3"
+mongodb = "3.6"
+rand = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

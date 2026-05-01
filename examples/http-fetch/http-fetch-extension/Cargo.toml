@@ -1,0 +1,15 @@
+[package]
+name = "http_fetch_extension"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Example cdylib: $httpFetch GETs a URL and returns body in one EOF document (demo only)"
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+bson = "2.15"
+extension-sdk-mongodb = { path = "../../../extension-sdk-mongodb" }
+ureq = { version = "2.10", default-features = true }

@@ -1,0 +1,11 @@
+[package]
+name = "extension-sys-mongodb"
+version.workspace = true
+edition.workspace = true
+description = "Low-level FFI bindings to the MongoDB Extensions public C API (api.h)"
+license.workspace = true
+
+[lib]
+name = "extension_sys_mongodb"
+
+[dependencies]

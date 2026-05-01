@@ -1,0 +1,24 @@
+# HTTP fetch extension demo (MongoDB 8.3). From repo root:
+#   docker compose -f examples/http-fetch/docker-compose.yml --project-name http-fetch-example up --build
+# Or: ./examples/http-fetch/run-demo.sh
+services:
+  mongo:
+    build:
+      context: ../..
+      dockerfile: examples/http-fetch/Dockerfile
+      args:
+        MONGO_IMAGE: ${MONGO_IMAGE:-mongo:8.3-rc-noble}
+    ports:
+      - "27021:27017"
+    volumes:
+      - ./scripts:/scripts:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mongosh --quiet --eval 'process.exit(db.adminCommand({ping:1}).ok ? 0 : 1)'",
+        ]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 15s

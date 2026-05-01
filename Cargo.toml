@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "extension-sys-mongodb",
+    "extension-sdk-mongodb",
+    "e2e-tests/e2e-extension",
+    "e2e-tests/mongo-extension-fuzz",
+    "examples/fibonacci/fibonacci-extension",
+    "examples/http-fetch/http-fetch-extension",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "SSPL-1.0"
+repository = "https://github.com/mongodb/mongo"
+description = "Rust SDK for MongoDB server extensions (aggregation stages)"

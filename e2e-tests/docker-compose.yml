@@ -1,0 +1,46 @@
+# End-to-end: build Rust extension + run MongoDB 8.3 with extension loaded.
+# Run from repo root: ./e2e-tests/run-e2e.sh
+# Override image: MONGO_IMAGE=mongo:8.3.0-rc5-noble docker compose -f e2e-tests/docker-compose.yml build
+
+services:
+  mongo:
+    build:
+      context: ..
+      dockerfile: e2e-tests/Dockerfile
+      args:
+        MONGO_IMAGE: ${MONGO_IMAGE:-mongo:8.3-rc-noble}
+    volumes:
+      - ./scripts:/scripts:ro
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mongosh --quiet --eval 'process.exit(db.adminCommand({ping:1}).ok ? 0 : 1)'",
+        ]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+
+  # Random aggregation driver against `mongo` (profile "fuzz" — not started by default `up`).
+  # Example: ITERATIONS=2000 ./e2e-tests/run-fuzz-e2e.sh
+  fuzz:
+    image: rust:bookworm
+    profiles: ["fuzz"]
+    depends_on:
+      mongo:
+        condition: service_healthy
+    working_dir: /build
+    volumes:
+      - ..:/build
+    environment:
+      MONGODB_URI: mongodb://mongo:27017
+      ITERATIONS: "${ITERATIONS:-5000}"
+      SEED: "${SEED:-}"
+      PER_ITER_TIMEOUT_MS: "${PER_ITER_TIMEOUT_MS:-8000}"
+      FUZZ_DATABASE: "${FUZZ_DATABASE:-mongo_extension_fuzz}"
+      # Avoid writing Linux artifacts into the host workspace ./target when mounting the repo.
+      CARGO_TARGET_DIR: /tmp/mongo-extension-fuzz-target
+    command: ["sh", "-c", "cargo run -p mongo_extension_fuzz --release"]
