@@ -1,0 +1,22 @@
+[package]
+name = "data_federation_extension"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Example cdylib: $readLocalJsonl streams JSONL under extension-config allowedRoot (demo only)"
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+bson = "2.15"
+extension-sdk-mongodb = { path = "../../../extension-sdk-mongodb" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

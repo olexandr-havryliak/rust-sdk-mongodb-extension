@@ -47,7 +47,7 @@ Override the toolchain image: **`RUST_TEST_IMAGE=my-registry/rust:nightly ./e2e-
 
 ### End-to-end: `mongod` + `mongosh` scripts
 
-Builds the e2e image, starts **`mongod`** with **`featureFlagExtensionsAPI`** and **`--loadExtensions`**, then runs the bundled checks (including **`$rustSdkE2e`**, **`$fibonacci`**, extension YAML **`e2eExtensionParam`**, explain, non-empty args, downstream **`$match`**, empty-collection EOF path, batch cursor). **`$fibonacci`** ([`fibonacci_source_e2e.js`](scripts/fibonacci_source_e2e.js)) covers **SourceStage**: **`aggregate: 1`** when the server allows it (no collection / no upstream), **empty collection** (scan EOF → generator), and **non-empty collection** (passthrough).
+Builds the e2e image, starts **`mongod`** with **`featureFlagExtensionsAPI`** and **`--loadExtensions`**, then runs the bundled checks (including **`$rustSdkE2e`**, **`$fibonacci`**, **`$readLocalJsonl`**, extension YAML **`e2eExtensionParam`**, explain, non-empty args, downstream **`$match`**, empty-collection EOF path, batch cursor). **`$fibonacci`** ([`fibonacci_source_e2e.js`](scripts/fibonacci_source_e2e.js)) covers **SourceStage**: **`aggregate: 1`** when the server allows it (no collection / no upstream), **empty collection** (scan EOF → generator), and **non-empty collection** (passthrough). **`$readLocalJsonl`** ([`data_federation_e2e.js`](scripts/data_federation_e2e.js)) reads JSONL from **`allowedRoot`** (**`/federation-data`**, fixtures bind-mount) with a downstream **`$match`**.
 
 ```bash
 chmod +x e2e-tests/run-e2e.sh

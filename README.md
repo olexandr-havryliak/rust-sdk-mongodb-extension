@@ -60,9 +60,9 @@ docker run --rm -v "$PWD:/build" -w /build rust:bookworm \
 | Topic | Where |
 |--------|--------|
 | Runnable **demo extensions** (Docker, mongosh, ports) | [`examples/README.md`](examples/README.md) |
-
-Quick **`mongosh`** smoke after each example’s **`run-demo.sh up`** (see [`examples/README.md`](examples/README.md) for ports): Fibonacci **`use fibonacci_demo; db.createCollection("n"); db.n.aggregate([{ $fibonacci: { n: 10 } }])`**. HTTP fetch **`use http_fetch_demo; db.createCollection("n"); db.n.aggregate([{ $httpFetch: { url: "https://example.com/", maxBytes: 65536 } }])`** (outbound HTTPS from the container).
 | **Tests**, CI-style Rust runs, e2e against real `mongod`, fuzz, Miri, debugging | [`e2e-tests/README.md`](e2e-tests/README.md) |
+
+Quick **`mongosh`** smoke after each example’s **`run-demo.sh up`** (see [`examples/README.md`](examples/README.md) for ports): Fibonacci **`use fibonacci_demo; db.createCollection("n"); db.n.aggregate([{ $fibonacci: { n: 10 } }])`**. HTTP fetch **`use http_fetch_demo; db.createCollection("n"); db.n.aggregate([{ $httpFetch: { url: "https://example.com/", maxBytes: 65536 } }])`** (outbound HTTPS from the container). Data federation **`use data_federation_demo; db.createCollection("n"); db.n.aggregate([{ $readLocalJsonl: { path: "sample.ndjson" } }])`** (fixtures at **`/federation-data`**; **`allowedRoot`** in extension **`*.conf`**).
 
 ## License
 

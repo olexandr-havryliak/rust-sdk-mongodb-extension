@@ -82,4 +82,20 @@ if ! grep -qE '^SOURCE_STAGE_NO_UPSTREAM_(OK|SKIPPED)' <<<"$fib"; then
   exit 1
 fi
 
+echo "==> Running \$readLocalJsonl (data federation fixtures on /federation-data)..."
+set +e
+fed="$("${COMPOSE[@]}" exec -T mongo mongosh --quiet /scripts/data_federation_e2e.js 2>&1)"
+fedrc=$?
+set -e
+if [[ "$fedrc" -ne 0 ]]; then
+  echo "$fed"
+  echo "mongosh data federation e2e exited with code $fedrc"
+  exit "$fedrc"
+fi
+if ! grep -q '^DATA_FEDERATION_E2E_OK$' <<<"$fed"; then
+  echo "$fed"
+  echo "Expected DATA_FEDERATION_E2E_OK in mongosh output"
+  exit 1
+fi
+
 echo "==> E2E passed."

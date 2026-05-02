@@ -1,0 +1,25 @@
+# Data federation example (local NDJSON). From repo root:
+#   docker compose -f examples/data-federation/docker-compose.yml --project-name data-federation-example up --build
+# Or: ./examples/data-federation/run-demo.sh
+services:
+  mongo:
+    build:
+      context: ../..
+      dockerfile: examples/data-federation/Dockerfile
+      args:
+        MONGO_IMAGE: ${MONGO_IMAGE:-mongo:8.3-rc-noble}
+    ports:
+      - "27022:27017"
+    volumes:
+      - ./scripts:/scripts:ro
+      - ./fixtures:/federation-data:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mongosh --quiet --eval 'process.exit(db.adminCommand({ping:1}).ok ? 0 : 1)'",
+        ]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 15s

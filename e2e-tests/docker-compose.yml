@@ -11,6 +11,7 @@ services:
         MONGO_IMAGE: ${MONGO_IMAGE:-mongo:8.3-rc-noble}
     volumes:
       - ./scripts:/scripts:ro
+      - ../examples/data-federation/fixtures:/federation-data:ro
     ports:
       - "27017:27017"
     healthcheck:

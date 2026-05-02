@@ -10,6 +10,7 @@ Each example’s **README** follows the same section order: summary → what the
 |---------|--------|-----------|--------|
 | **fibonacci** | `$fibonacci` (source / generator) | **27018** | [fibonacci/README.md](fibonacci/README.md) |
 | **http-fetch** | `$httpFetch` (map + EOF) | **27021** | [http-fetch/README.md](http-fetch/README.md) |
+| **data-federation** | `$readLocalJsonl` (JSONL under `allowedRoot`) | **27022** | [data-federation/README.md](data-federation/README.md) |
 
 Use a **different host port per stack** so several examples (or `e2e-tests`) can run at once.
 
@@ -27,6 +28,11 @@ db.n.aggregate([{ $fibonacci: { n: 10 } }]);
 use http_fetch_demo;
 db.createCollection("n");
 db.n.aggregate([{ $httpFetch: { url: "https://example.com/", maxBytes: 65536 } }]);
+
+// Data federation — port 27022 (fixtures → `/federation-data`; `allowedRoot` in extension conf)
+use data_federation_demo;
+db.createCollection("n");
+db.n.aggregate([{ $readLocalJsonl: { path: "sample.ndjson" } }]);
 ```
 
 ## Layout (every example)
