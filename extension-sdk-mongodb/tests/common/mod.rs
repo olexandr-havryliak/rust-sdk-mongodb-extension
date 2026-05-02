@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 
+use std::mem::ManuallyDrop;
+
 use extension_sdk_mongodb::status;
 use extension_sdk_mongodb::sys::{
     MongoExtensionAggStageAstNode, MongoExtensionAggStageDescriptor, MongoExtensionAggStageParseNode,
@@ -64,34 +66,71 @@ pub unsafe extern "C" fn mock_create_id_lookup(
     status::status_ok()
 }
 
-pub fn leak_portal_and_services(
-    register: unsafe extern "C" fn(
-        *const MongoExtensionHostPortal,
-        *const MongoExtensionAggStageDescriptor,
-    ) -> *mut MongoExtensionStatus,
-) -> (
-    &'static MongoExtensionHostPortal,
-    &'static MongoExtensionHostServices,
-) {
-    let portal_vt = Box::leak(Box::new(MongoExtensionHostPortalVTable {
-        register_stage_descriptor: register,
-        get_extension_options: mock_get_extension_options,
-    }));
-    let svcs_vt = Box::leak(Box::new(MongoExtensionHostServicesVTable {
-        get_logger: mock_get_logger,
-        user_asserted: mock_user_asserted,
-        tripwire_asserted: mock_tripwire_asserted,
-        mark_idle_thread_block: mock_mark_idle_thread_block,
-        create_host_agg_stage_parse_node: mock_create_host_agg_stage_parse_node,
-        create_id_lookup: mock_create_id_lookup,
-    }));
-    let portal = Box::leak(Box::new(MongoExtensionHostPortal {
-        vtable: portal_vt,
-        host_extensions_api_version: EXTENSION_API_VERSION,
-        host_mongodb_max_wire_version: 0,
-    }));
-    let svcs = Box::leak(Box::new(MongoExtensionHostServices {
-        vtable: svcs_vt,
-    }));
-    (portal, svcs)
+/// Mock host portal + services. Vtables are `Box::into_raw` allocations; `portal`/`svcs` hold those
+/// addresses as `*const` (ABI). We never move a `Box` after forming a pointer into it (Miri-safe).
+pub struct MockHost {
+    portal: ManuallyDrop<Box<MongoExtensionHostPortal>>,
+    svcs: ManuallyDrop<Box<MongoExtensionHostServices>>,
+    portal_vt: *mut MongoExtensionHostPortalVTable,
+    svcs_vt: *mut MongoExtensionHostServicesVTable,
+}
+
+impl MockHost {
+    pub fn new(
+        register: unsafe extern "C" fn(
+            *const MongoExtensionHostPortal,
+            *const MongoExtensionAggStageDescriptor,
+        ) -> *mut MongoExtensionStatus,
+    ) -> Box<Self> {
+        let portal_vt = Box::new(MongoExtensionHostPortalVTable {
+            register_stage_descriptor: register,
+            get_extension_options: mock_get_extension_options,
+        });
+        let portal_vt_raw = Box::into_raw(portal_vt);
+
+        let svcs_vt = Box::new(MongoExtensionHostServicesVTable {
+            get_logger: mock_get_logger,
+            user_asserted: mock_user_asserted,
+            tripwire_asserted: mock_tripwire_asserted,
+            mark_idle_thread_block: mock_mark_idle_thread_block,
+            create_host_agg_stage_parse_node: mock_create_host_agg_stage_parse_node,
+            create_id_lookup: mock_create_id_lookup,
+        });
+        let svcs_vt_raw = Box::into_raw(svcs_vt);
+
+        let portal = Box::new(MongoExtensionHostPortal {
+            vtable: portal_vt_raw,
+            host_extensions_api_version: EXTENSION_API_VERSION,
+            host_mongodb_max_wire_version: 0,
+        });
+        let svcs = Box::new(MongoExtensionHostServices {
+            vtable: svcs_vt_raw,
+        });
+
+        Box::new(Self {
+            portal: ManuallyDrop::new(portal),
+            svcs: ManuallyDrop::new(svcs),
+            portal_vt: portal_vt_raw,
+            svcs_vt: svcs_vt_raw,
+        })
+    }
+
+    pub fn portal(&self) -> &MongoExtensionHostPortal {
+        &self.portal
+    }
+
+    pub fn services(&self) -> &MongoExtensionHostServices {
+        &self.svcs
+    }
+}
+
+impl Drop for MockHost {
+    fn drop(&mut self) {
+        unsafe {
+            ManuallyDrop::drop(&mut self.portal);
+            ManuallyDrop::drop(&mut self.svcs);
+            drop(Box::from_raw(self.portal_vt));
+            drop(Box::from_raw(self.svcs_vt));
+        }
+    }
 }

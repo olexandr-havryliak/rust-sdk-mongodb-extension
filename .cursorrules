@@ -1,0 +1,90 @@
+# Cursor rules — Rust SDK for MongoDB Extensions
+
+You are working in the **Rust SDK for MongoDB Extensions** repository: Rust crates and tooling for **MongoDB server extensions** (aggregation stages loaded into `mongod` as shared libraries).
+
+---
+
+## Product naming
+
+Use the name **Rust SDK for MongoDB Extensions**. Do **not** use “MongoDB Extension SDK (Rust)” or similar variants in documentation, comments meant for users, or README text.
+
+---
+
+## Development philosophy
+
+**Test-Driven Development (TDD) is mandatory** in this repository.
+
+---
+
+## Core rules
+
+1. **Never write implementation code first.** Always start with a **failing test** that clearly defines the expected behavior.
+2. Follow the **Red → Green → Refactor** cycle:
+   - **Red:** write a failing test.
+   - **Green:** write the smallest change that makes the test pass.
+   - **Refactor:** clean up while keeping tests green.
+3. **Tests drive design.** Do not design APIs up front in large speculative steps. Let tests shape traits, structs, and abstractions.
+4. **Keep tests small and focused:** one behavior per test; prefer several small tests over one large test.
+5. **Prefer integration tests for extension behavior**, especially for MongoDB aggregation stages. Use the existing **Docker-based e2e** setup when it is the right level of realism.
+6. **Every new feature needs tests.** A feature is not complete without tests. Do not open a PR without test coverage for the behavior you add or change.
+7. **When modifying code:** first add a **failing test** that reproduces the bug or missing behavior, then fix the implementation.
+
+---
+
+## Verification (Docker)
+
+**Do not assume a local `cargo` or rustup toolchain.** This project standardizes verification in **Docker**.
+
+- After meaningful Rust changes, **run the test suite in Docker** from the repo root:
+  - `./e2e-tests/run-sdk-tests-docker.sh`
+- If Docker is unavailable in a given environment, say so once, then still make the change test-complete; the author runs the same script locally or in CI.
+- For broader checks (documented separately): Miri `./e2e-tests/run-miri-docker.sh`, e2e `./e2e-tests/run-e2e.sh`, compose flows in `e2e-tests/README.md`.
+
+Agents must **execute** `./e2e-tests/run-sdk-tests-docker.sh` when verifying Rust tests (not only suggest it), unless Docker cannot run in that session.
+
+---
+
+## Rust-specific guidelines
+
+- Use `#[test]` for unit tests in crate `src/` where appropriate.
+- Use crate `tests/` for integration tests when you need a separate test binary.
+- Avoid unnecessary mocking; prefer real behavior when it is practical.
+- Use **BSON documents** in tests so shapes match what MongoDB sends and receives.
+- Cover **FFI boundaries** with tests when it is feasible (panic boundaries, status handling, buffer ownership).
+
+---
+
+## Rust SDK for MongoDB Extensions (aggregation context)
+
+Treat each aggregation stage as a **testable unit**. Prefer tests that exercise:
+
+- Stage **parsing** (stage document and arguments).
+- Stage **execution** (e.g. `get_next` semantics).
+- **BSON** input and output.
+
+**Source stages:** assert **full output sequences** (order and contents).
+
+**Transform / map stages:** assert **explicit input → output** mapping.
+
+---
+
+## Anti-patterns (do not do this)
+
+- Shipping large amounts of implementation without tests.
+- Writing tests only **after** implementation (except when retrofitting; then add failing tests first, then fix).
+- Skipping tests because the logic seems “simple.”
+- Ignoring failing tests or leaving the suite red.
+- Relying on **`println!` debugging** instead of tests for correctness.
+
+---
+
+## When you are unsure
+
+Default to this loop:
+
+1. Write a failing test.
+2. Run the tests (**prefer** `./e2e-tests/run-sdk-tests-docker.sh` from repo root).
+3. Implement the minimal fix.
+4. Refactor with tests still green.
+
+TDD is not optional here.

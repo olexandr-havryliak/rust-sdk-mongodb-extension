@@ -12,3 +12,4 @@ path = "src/lib.rs"
 [dependencies]
 bson = "2.15"
 extension-sdk-mongodb = { path = "../../extension-sdk-mongodb" }
+serde_json = "1"

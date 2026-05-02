@@ -14,6 +14,7 @@ use std::sync::OnceLock;
 use bson::Document;
 
 use crate::byte_buf;
+use crate::expansion::Expansion;
 use crate::host;
 use crate::panics::ffi_boundary;
 use crate::status;
@@ -51,6 +52,11 @@ pub struct MapStageGlobals {
     /// [`host::extension_options_raw`](crate::host::extension_options_raw) YAML).
     pub on_extension_initialized:
         Option<unsafe fn(*const crate::sys::MongoExtensionHostPortal) -> Result<(), String>>,
+    /// BSON for `get_properties` on the AST node (planner static properties).
+    pub static_properties_doc: fn() -> Document,
+    /// Optional parse-time expansion for typed transforms (`export_transform_stage_type!`); map-only
+    /// macros pass `None` (always [`Expansion::SelfStage`]).
+    pub expand_from_args_doc: Option<fn(Document) -> Result<Expansion, String>>,
 }
 
 static MAP_ACTIVE_STAGE: OnceLock<MapStageGlobals> = OnceLock::new();
@@ -182,10 +188,38 @@ unsafe extern "C" fn parse_expand(
     *out = std::ptr::null_mut();
     let r = ffi_boundary(|| -> Result<*mut MongoExtensionExpandedArrayContainer, String> {
         let this = p.cast::<ParseObj>();
-        let args = (*this).args.clone();
-        let ast = Box::into_raw(Box::new(ast_alloc(args))).cast::<MongoExtensionAggStageAstNode>();
-        let c = Box::new(expanded_single(ast));
-        Ok(Box::into_raw(c).cast::<MongoExtensionExpandedArrayContainer>())
+        let args_bytes = (*this).args.clone();
+        let args_doc = Document::from_reader(args_bytes.as_slice()).map_err(|e| e.to_string())?;
+        let g = map_globals();
+        if let Some(expand_fn) = g.expand_from_args_doc {
+            match expand_fn(args_doc).map_err(|e| e)? {
+                Expansion::SelfStage => {
+                    let ast = Box::into_raw(Box::new(ast_alloc(args_bytes)))
+                        .cast::<MongoExtensionAggStageAstNode>();
+                    let c = Box::new(expanded_single(ast));
+                    Ok(Box::into_raw(c).cast::<MongoExtensionExpandedArrayContainer>())
+                }
+                Expansion::Pipeline(docs) => {
+                    let blobs = Expansion::pipeline_stage_arg_blobs(g.name, &docs)
+                        .map_err(|e| e.to_string())?;
+                    let mut asts: Vec<*mut MongoExtensionAggStageAstNode> =
+                        Vec::with_capacity(blobs.len());
+                    for b in blobs {
+                        asts.push(
+                            Box::into_raw(Box::new(ast_alloc(b)))
+                                .cast::<MongoExtensionAggStageAstNode>(),
+                        );
+                    }
+                    let c = Box::new(expanded_multi(asts));
+                    Ok(Box::into_raw(c).cast::<MongoExtensionExpandedArrayContainer>())
+                }
+            }
+        } else {
+            let ast = Box::into_raw(Box::new(ast_alloc(args_bytes)))
+                .cast::<MongoExtensionAggStageAstNode>();
+            let c = Box::new(expanded_single(ast));
+            Ok(Box::into_raw(c).cast::<MongoExtensionExpandedArrayContainer>())
+        }
     });
     match r {
         None => status::new_error_status(-1, "panic during expand"),
@@ -325,6 +359,71 @@ unsafe fn ast_destroy(p: *mut MongoExtensionAggStageAstNode) {
     drop(Box::from_raw(p.cast::<AstObj>()));
 }
 
+// --- Expanded array (multiple AST nodes; pipeline expansion) ---
+
+#[repr(C)]
+struct ExpandedMulti {
+    base: MongoExtensionExpandedArrayContainer,
+    asts: Vec<*mut MongoExtensionAggStageAstNode>,
+    transferred: Cell<bool>,
+}
+
+unsafe extern "C" fn exp_multi_destroy(p: *mut MongoExtensionExpandedArrayContainer) {
+    if p.is_null() {
+        return;
+    }
+    let this = p.cast::<ExpandedMulti>();
+    if !(*this).transferred.get() {
+        for ast in &(*this).asts {
+            if !ast.is_null() {
+                ast_destroy(*ast);
+            }
+        }
+    }
+    drop(Box::from_raw(this));
+}
+
+unsafe extern "C" fn exp_multi_size(p: *const MongoExtensionExpandedArrayContainer) -> usize {
+    let this = p.cast::<ExpandedMulti>();
+    (*this).asts.len()
+}
+
+unsafe extern "C" fn exp_multi_transfer(
+    p: *mut MongoExtensionExpandedArrayContainer,
+    arr: *mut MongoExtensionExpandedArray,
+) -> *mut MongoExtensionStatus {
+    let this = p.cast::<ExpandedMulti>();
+    let n = (*this).asts.len();
+    if (*arr).size != n {
+        return status::new_error_status(-1, "expanded array size mismatch");
+    }
+    let el = (*arr).elements;
+    for (i, ast) in (*this).asts.iter().enumerate() {
+        let slot = el.add(i);
+        (*slot).type_ = MongoExtensionAggStageNodeType::kAstNode;
+        (*slot).parse_or_ast = MongoExtensionExpandedArrayElementUnion { ast: *ast };
+    }
+    (*this).transferred.set(true);
+    status::status_ok()
+}
+
+static EXPANDED_MULTI_VTABLE: MongoExtensionExpandedArrayContainerVTable =
+    MongoExtensionExpandedArrayContainerVTable {
+        destroy: exp_multi_destroy,
+        size: exp_multi_size,
+        transfer: exp_multi_transfer,
+    };
+
+fn expanded_multi(asts: Vec<*mut MongoExtensionAggStageAstNode>) -> ExpandedMulti {
+    ExpandedMulti {
+        base: MongoExtensionExpandedArrayContainer {
+            vtable: &EXPANDED_MULTI_VTABLE,
+        },
+        asts,
+        transferred: Cell::new(false),
+    }
+}
+
 unsafe extern "C" fn ast_ext_destroy(p: *mut MongoExtensionAggStageAstNode) {
     ast_destroy(p);
 }
@@ -337,8 +436,8 @@ unsafe extern "C" fn ast_get_properties(
     _: *const MongoExtensionAggStageAstNode,
     out: *mut *mut crate::sys::MongoExtensionByteBuf,
 ) -> *mut MongoExtensionStatus {
-    let empty = bson::Document::new();
-    match byte_buf::from_bson(&empty) {
+    let doc = (map_globals().static_properties_doc)();
+    match byte_buf::from_bson(&doc) {
         Ok(b) => {
             *out = b;
             status::status_ok()
@@ -788,6 +887,9 @@ unsafe extern "C" fn ext_init(
 ) -> *mut MongoExtensionStatus {
     let r = ffi_boundary(|| -> Result<(), String> {
         host::set_host_services(services);
+        unsafe {
+            host::cache_extension_options_from_portal(portal);
+        }
         let mg = map_globals();
         if let Some(init) = mg.on_extension_initialized {
             unsafe { init(portal)? };

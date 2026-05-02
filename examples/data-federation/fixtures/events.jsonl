@@ -1,0 +1,4 @@
+{"level":"info","msg":"warmup"}
+{"level":"error","msg":"first failure"}
+{"level":"error","msg":"second failure"}
+{"level":"warn","msg":"edge"}

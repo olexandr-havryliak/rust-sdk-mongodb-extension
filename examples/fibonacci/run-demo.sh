@@ -58,7 +58,7 @@ case "$cmd" in
     echo "==> Ready. Connect:"
     echo "    mongosh --port 27018"
     echo "  Example:"
-    echo "    use fibonacci_demo; db.n.insertOne({x:1}); db.n.aggregate([{ \\\$fibonacci: { n: 10 } }])"
+    echo "    use fibonacci_demo; db.createCollection(\"n\"); db.n.aggregate([{ \\\$fibonacci: { n: 10 } }])"
     echo "  Stop:"
     echo "    $0 down"
     exit 0
@@ -99,7 +99,7 @@ case "$cmd" in
     fi
 
     echo "==> Demo passed. Try: mongosh --port 27018"
-    echo "    db.fibonacci_demo.n.aggregate([ { \\\$fibonacci: { n: 12 } } ])"
+    echo "    use fibonacci_demo; db.n.aggregate([{ \\\$fibonacci: { n: 10 } }])"
     exit 0
     ;;
   *)

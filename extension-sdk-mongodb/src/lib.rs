@@ -1,11 +1,17 @@
-//! Rust SDK for building MongoDB server extensions (aggregation stages) as `cdylib` plugins.
+//! **Rust SDK for MongoDB Extensions** — build MongoDB server extensions (aggregation stages) as `cdylib` plugins.
 //!
-//! The server loads your `.so` via `dlopen` and resolves [`GET_MONGODB_EXTENSION_SYMBOL`]. This
-//! crate provides:
+//! The server loads your `.so` via `dlopen` and resolves [`GET_MONGODB_EXTENSION_SYMBOL`]. The SDK
+//! centers on **[`stage_model::StagePlan`]**: planner [`StageProperties`], an
+//! [`stage_model::ExecutionModel`] (**streaming** vs **blocking**), lifecycle shape, and
+//! [`stage_model::Expansion`] for parse-time pipeline lowering. Export macros
+//! ([`export_source_stage!`], [`export_map_transform_stage!`], [`export_transform_stage!`]) keep the
+//! same surface and use the same defaults as those [`StagePlan`] constructors. This crate also provides:
 //! - Re-exported [`sys`] FFI types
 //! - [`export_transform_stage`] for a passthrough transform stage (documents unchanged)
 //! - [`export_map_transform_stage!`] for a stage that maps each upstream row with a Rust function
-//! - Utilities: [`byte_buf`], [`status`], [`version`], [`host`]
+//! - [`export_source_stage!`] for a **source** stage (generator when scan is empty; passthrough when
+//!   the collection has documents; override [`SourceStage::properties`](source_stage::SourceStage::properties) for collection-less-only)
+//! - Utilities: [`byte_buf`], [`status`], [`version`], [`host`], [`StageContext`], [`Next`], [`error`], [`TransformStage`], [`stage_properties`], [`Expansion`](expansion::Expansion), [`BlockingStage`](blocking_stage::BlockingStage)
 //!
 //! ## Example
 //!
@@ -18,20 +24,41 @@
 
 #![warn(missing_docs)]
 
+pub mod blocking_stage;
 pub mod byte_buf;
+pub mod error;
+pub mod expansion;
+pub(crate) mod extension_log;
 pub mod host;
 pub mod map_transform;
+pub mod operation_metrics;
 pub mod panics;
 pub mod passthrough;
+pub mod source_stage;
+pub mod stage_context;
+pub mod stage_model;
+pub mod stage_output;
+pub mod stage_properties;
 pub mod status;
+pub mod transform_stage;
 pub mod version;
 
 pub use extension_sys_mongodb as sys;
 
 pub use sys::GET_MONGODB_EXTENSION_SYMBOL;
 
+pub use blocking_stage::BlockingStage;
+pub use error::{parse_args, ExtensionError};
+pub use error::Result as ExtensionResult;
+pub use expansion::Expansion;
 pub use map_transform::{get_map_extension_impl, MapStageGlobals};
 pub use passthrough::{get_extension_impl, StageGlobals};
+pub use source_stage::{get_source_extension_impl, SourceOps, SourceStage};
+pub use stage_context::{OperationMetricsSink, StageContext};
+pub use stage_model::{ExecutionModel, StageLifecycleShape, StagePlan};
+pub use stage_output::Next;
+pub use stage_properties::{default_map_stage_static_properties, StagePosition, StageProperties, StreamType};
+pub use transform_stage::TransformStage;
 
 /// Defines `get_mongodb_extension` exporting a single passthrough transform stage.
 ///
@@ -49,8 +76,43 @@ macro_rules! export_transform_stage {
             let globals = $crate::passthrough::StageGlobals {
                 name: $stage,
                 expect_empty: $expect_empty,
+                static_properties_doc: $crate::stage_properties::default_map_stage_static_properties,
+                expand_from_args_doc: std::option::Option::None,
             };
             $crate::passthrough::get_extension_impl(globals, host_versions, extension_out)
+        }
+    };
+}
+
+// Shared body for map-style extensions; `$static_properties_doc` is `fn() -> bson::Document`;
+// `$expand_from_args` is `std::option::Option<fn(bson::Document) -> std::result::Result<$crate::expansion::Expansion, std::string::String>>`.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __export_map_stage_common {
+    (
+        $stage:literal,
+        $expect_empty:expr,
+        $transform:path,
+        $on_eof:expr,
+        $on_init:expr,
+        $static_properties_doc:path,
+        $expand_from_args:expr
+    ) => {
+        #[no_mangle]
+        pub unsafe extern "C" fn get_mongodb_extension(
+            host_versions: *const $crate::sys::MongoExtensionAPIVersionVector,
+            extension_out: *mut *const $crate::sys::MongoExtension,
+        ) -> *mut $crate::sys::MongoExtensionStatus {
+            let globals = $crate::map_transform::MapStageGlobals {
+                name: $stage,
+                expect_empty: $expect_empty,
+                transform: $transform,
+                on_eof_no_rows: $on_eof,
+                on_extension_initialized: $on_init,
+                static_properties_doc: $static_properties_doc,
+                expand_from_args_doc: $expand_from_args,
+            };
+            $crate::map_transform::get_map_extension_impl(globals, host_versions, extension_out)
         }
     };
 }
@@ -79,51 +141,170 @@ macro_rules! export_map_transform_stage {
         $on_eof:path,
         $on_init:path $(,)?
     ) => {
-        #[no_mangle]
-        pub unsafe extern "C" fn get_mongodb_extension(
-            host_versions: *const $crate::sys::MongoExtensionAPIVersionVector,
-            extension_out: *mut *const $crate::sys::MongoExtension,
-        ) -> *mut $crate::sys::MongoExtensionStatus {
-            let globals = $crate::map_transform::MapStageGlobals {
-                name: $stage,
-                expect_empty: $expect_empty,
-                transform: $transform,
-                on_eof_no_rows: Some($on_eof),
-                on_extension_initialized: Some($on_init),
-            };
-            $crate::map_transform::get_map_extension_impl(globals, host_versions, extension_out)
-        }
+        $crate::__export_map_stage_common!(
+            $stage,
+            $expect_empty,
+            $transform,
+            std::option::Option::Some($on_eof),
+            std::option::Option::Some($on_init),
+            $crate::stage_properties::default_map_stage_static_properties,
+            std::option::Option::None
+        );
     };
     ($stage:literal, $expect_empty:expr, $transform:path, $on_eof:path $(,)? ) => {
-        #[no_mangle]
-        pub unsafe extern "C" fn get_mongodb_extension(
-            host_versions: *const $crate::sys::MongoExtensionAPIVersionVector,
-            extension_out: *mut *const $crate::sys::MongoExtension,
-        ) -> *mut $crate::sys::MongoExtensionStatus {
-            let globals = $crate::map_transform::MapStageGlobals {
-                name: $stage,
-                expect_empty: $expect_empty,
-                transform: $transform,
-                on_eof_no_rows: Some($on_eof),
-                on_extension_initialized: None,
-            };
-            $crate::map_transform::get_map_extension_impl(globals, host_versions, extension_out)
-        }
+        $crate::__export_map_stage_common!(
+            $stage,
+            $expect_empty,
+            $transform,
+            std::option::Option::Some($on_eof),
+            std::option::Option::None,
+            $crate::stage_properties::default_map_stage_static_properties,
+            std::option::Option::None
+        );
     };
     ($stage:literal, $expect_empty:expr, $transform:path $(,)? ) => {
+        $crate::__export_map_stage_common!(
+            $stage,
+            $expect_empty,
+            $transform,
+            std::option::Option::None,
+            std::option::Option::None,
+            $crate::stage_properties::default_map_stage_static_properties,
+            std::option::Option::None
+        );
+    };
+}
+
+/// Defines `get_mongodb_extension` from a [`TransformStage`](crate::transform_stage::TransformStage) impl (same map host path; uses per-type [`TransformStage::properties`](crate::transform_stage::TransformStage::properties) for static BSON).
+///
+/// Pass the stage name literal (must match [`TransformStage::NAME`](TransformStage::NAME)), the same
+/// `expect_empty` flag as [`export_transform_stage!`](export_transform_stage), and the implementing type.
+///
+/// ```ignore
+/// struct DoubleX;
+/// impl extension_sdk_mongodb::TransformStage for DoubleX {
+///     const NAME: &'static str = "$doubleX";
+///     type Args = bson::Document;
+///     fn parse(args: bson::Document) -> extension_sdk_mongodb::ExtensionResult<Self::Args> { Ok(args) }
+///     fn transform(input: bson::Document, _args: &Self::Args, _ctx: &mut extension_sdk_mongodb::StageContext) -> extension_sdk_mongodb::ExtensionResult<bson::Document> {
+///         Ok(input)
+///     }
+/// }
+/// extension_sdk_mongodb::export_transform_stage_type!("$doubleX", false, DoubleX);
+/// ```
+#[macro_export]
+macro_rules! export_transform_stage_type {
+    ($stage:literal, $expect_empty:expr, $t:ty $(,)? ) => {
+        fn __typed_transform_row(
+            row: &bson::Document,
+            args: &bson::Document,
+        ) -> std::result::Result<bson::Document, std::string::String> {
+            let parsed = <$t as $crate::transform_stage::TransformStage>::parse(args.clone())
+                .map_err(|e| e.to_string())?;
+            let mut ctx = $crate::stage_context::StageContext::new();
+            <$t as $crate::transform_stage::TransformStage>::transform(row.clone(), &parsed, &mut ctx)
+                .map_err(|e| e.to_string())
+        }
+        fn __typed_transform_static_properties() -> bson::Document {
+            <$t as $crate::transform_stage::TransformStage>::properties().to_document()
+        }
+        fn __typed_transform_expand(
+            args: bson::Document,
+        ) -> std::result::Result<$crate::expansion::Expansion, std::string::String> {
+            let a = <$t as $crate::transform_stage::TransformStage>::parse(args)
+                .map_err(|e| e.to_string())?;
+            Ok(<$t as $crate::transform_stage::TransformStage>::expand(&a))
+        }
+        $crate::__export_map_stage_common!(
+            $stage,
+            $expect_empty,
+            __typed_transform_row,
+            std::option::Option::None,
+            std::option::Option::None,
+            __typed_transform_static_properties,
+            std::option::Option::Some(__typed_transform_expand)
+        );
+    };
+}
+
+/// Defines `get_mongodb_extension` exporting a [`SourceStage`](crate::source_stage::SourceStage)
+/// generator stage (emits documents when there is no upstream executable stage).
+///
+/// Pass the implementing type (unit struct or zero-sized type). Only **one** `export_source_stage!`
+/// may appear per crate (single `get_mongodb_extension` symbol).
+///
+/// ```ignore
+/// struct MyGen;
+/// impl extension_sdk_mongodb::SourceStage for MyGen {
+///     const NAME: &'static str = "$myGen";
+///     type Args = bson::Document;
+///     type State = usize;
+///     fn parse(args: bson::Document) -> extension_sdk_mongodb::ExtensionResult<Self::Args> { Ok(args) }
+///     fn open(args: Self::Args, _ctx: &mut extension_sdk_mongodb::StageContext) -> extension_sdk_mongodb::ExtensionResult<Self::State> { Ok(0) }
+///     fn next(state: &mut Self::State, _ctx: &mut extension_sdk_mongodb::StageContext) -> extension_sdk_mongodb::ExtensionResult<extension_sdk_mongodb::Next> {
+///         if *state >= 3 { return Ok(extension_sdk_mongodb::Next::Eof); }
+///         let d = bson::doc! { "i": *state as i32 };
+///         *state += 1;
+///         Ok(extension_sdk_mongodb::Next::Advanced { document: d, metadata: None })
+///     }
+/// }
+/// extension_sdk_mongodb::export_source_stage!(MyGen);
+/// ```
+#[macro_export]
+macro_rules! export_source_stage {
+    ($t:ty $(,)? ) => {
+        fn __sdk_source_open(
+            d: bson::Document,
+            ctx: &mut $crate::stage_context::StageContext,
+        ) -> $crate::error::Result<*mut std::ffi::c_void> {
+            let a = <$t as $crate::source_stage::SourceStage>::parse(d)?;
+            let s = <$t as $crate::source_stage::SourceStage>::open(a, ctx)?;
+            Ok(std::boxed::Box::into_raw(std::boxed::Box::new(s)) as *mut std::ffi::c_void)
+        }
+        unsafe fn __sdk_source_drop(p: *mut std::ffi::c_void) {
+            if p.is_null() {
+                return;
+            }
+            drop(std::boxed::Box::from_raw(
+                p as *mut <$t as $crate::source_stage::SourceStage>::State,
+            ));
+        }
+        unsafe fn __sdk_source_next(
+            p: *mut std::ffi::c_void,
+            ctx: &mut $crate::stage_context::StageContext,
+        ) -> $crate::error::Result<$crate::stage_output::Next> {
+            let s = &mut *(p as *mut <$t as $crate::source_stage::SourceStage>::State);
+            <$t as $crate::source_stage::SourceStage>::next(s, ctx)
+        }
+        fn __sdk_source_static_properties() -> bson::Document {
+            <$t as $crate::source_stage::SourceStage>::properties().to_document()
+        }
+        fn __sdk_source_expand_inner(
+            d: bson::Document,
+        ) -> $crate::error::Result<$crate::expansion::Expansion> {
+            let a = <$t as $crate::source_stage::SourceStage>::parse(d)?;
+            Ok(<$t as $crate::source_stage::SourceStage>::expand(&a))
+        }
+        static __SDK_SOURCE_OPS: $crate::source_stage::SourceOps = $crate::source_stage::SourceOps {
+            name: <$t as $crate::source_stage::SourceStage>::NAME,
+            expect_empty: false,
+            open_from_doc: __sdk_source_open,
+            drop_state: __sdk_source_drop,
+            next: __sdk_source_next,
+            on_extension_initialized: None,
+            static_properties_doc: __sdk_source_static_properties,
+            expand_inner: __sdk_source_expand_inner,
+        };
         #[no_mangle]
         pub unsafe extern "C" fn get_mongodb_extension(
             host_versions: *const $crate::sys::MongoExtensionAPIVersionVector,
             extension_out: *mut *const $crate::sys::MongoExtension,
         ) -> *mut $crate::sys::MongoExtensionStatus {
-            let globals = $crate::map_transform::MapStageGlobals {
-                name: $stage,
-                expect_empty: $expect_empty,
-                transform: $transform,
-                on_eof_no_rows: None,
-                on_extension_initialized: None,
-            };
-            $crate::map_transform::get_map_extension_impl(globals, host_versions, extension_out)
+            $crate::source_stage::get_source_extension_impl(
+                &__SDK_SOURCE_OPS,
+                host_versions,
+                extension_out,
+            )
         }
     };
 }

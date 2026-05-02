@@ -1,6 +1,7 @@
 //! `get_map_extension_impl` rejects null / incompatible API before installing globals.
 
 use bson::{doc, Document};
+use extension_sdk_mongodb::default_map_stage_static_properties;
 use extension_sdk_mongodb::map_transform::{get_map_extension_impl, MapStageGlobals};
 use extension_sdk_mongodb::sys::{
     MongoExtension, MongoExtensionAPIVersion, MongoExtensionAPIVersionVector,
@@ -18,6 +19,8 @@ fn globals() -> MapStageGlobals {
         transform: tr,
         on_eof_no_rows: None,
         on_extension_initialized: None,
+        static_properties_doc: default_map_stage_static_properties,
+        expand_from_args_doc: None,
     }
 }
 

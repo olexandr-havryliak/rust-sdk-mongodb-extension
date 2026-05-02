@@ -5,7 +5,8 @@ mod common;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bson::{doc, Document};
-use common::leak_portal_and_services;
+use common::MockHost;
+use extension_sdk_mongodb::default_map_stage_static_properties;
 use extension_sdk_mongodb::map_transform::{get_map_extension_impl, MapStageGlobals};
 use extension_sdk_mongodb::status;
 use extension_sdk_mongodb::sys::{
@@ -40,7 +41,7 @@ fn eof(_args: &Document) -> Result<Document, String> {
 #[test]
 fn map_initialize_fails_when_register_fails_after_hook() {
     INIT_HOOK_RAN.store(false, Ordering::SeqCst);
-    let (portal, svcs) = leak_portal_and_services(mock_register_fail);
+    let host = MockHost::new(mock_register_fail);
     let mut slots = [MongoExtensionAPIVersion {
         major: EXTENSION_API_VERSION.major,
         minor: EXTENSION_API_VERSION.minor,
@@ -55,6 +56,8 @@ fn map_initialize_fails_when_register_fails_after_hook() {
         transform: tr,
         on_eof_no_rows: Some(eof),
         on_extension_initialized: Some(on_init),
+        static_properties_doc: default_map_stage_static_properties,
+        expand_from_args_doc: None,
     };
     let mut out: *const MongoExtension = std::ptr::null();
     unsafe {
@@ -70,7 +73,11 @@ fn map_initialize_fails_when_register_fails_after_hook() {
         assert!(!out.is_null());
 
         let ev = (*out).vtable;
-        let init_st = ((*ev).initialize)(out, std::ptr::from_ref(portal), std::ptr::from_ref(svcs));
+        let init_st = ((*ev).initialize)(
+            out,
+            std::ptr::from_ref(host.portal()),
+            std::ptr::from_ref(host.services()),
+        );
         assert!(!init_st.is_null());
         let iv = (*init_st).vtable;
         assert_ne!(((*iv).get_code)(init_st), MONGO_EXTENSION_STATUS_OK);

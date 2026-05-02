@@ -2,7 +2,8 @@
 
 mod common;
 
-use common::{leak_portal_and_services, mock_register_ok};
+use common::{mock_register_ok, MockHost};
+use extension_sdk_mongodb::default_map_stage_static_properties;
 use extension_sdk_mongodb::passthrough::{get_extension_impl, StageGlobals};
 use extension_sdk_mongodb::sys::{
     MongoExtension, MongoExtensionAPIVersion, MongoExtensionAPIVersionVector, MONGO_EXTENSION_STATUS_OK,
@@ -11,7 +12,7 @@ use extension_sdk_mongodb::version::EXTENSION_API_VERSION;
 
 #[test]
 fn passthrough_initialize_succeeds_with_mock_host() {
-    let (portal, svcs) = leak_portal_and_services(mock_register_ok);
+    let host = MockHost::new(mock_register_ok);
     let mut slots = [MongoExtensionAPIVersion {
         major: EXTENSION_API_VERSION.major,
         minor: EXTENSION_API_VERSION.minor,
@@ -23,6 +24,8 @@ fn passthrough_initialize_succeeds_with_mock_host() {
     let globals = StageGlobals {
         name: "$passSdkInitTest",
         expect_empty: false,
+        static_properties_doc: default_map_stage_static_properties,
+        expand_from_args_doc: None,
     };
     let mut out: *const MongoExtension = std::ptr::null();
     unsafe {
@@ -34,7 +37,11 @@ fn passthrough_initialize_succeeds_with_mock_host() {
         assert!(!out.is_null());
 
         let ev = (*out).vtable;
-        let init_st = ((*ev).initialize)(out, std::ptr::from_ref(portal), std::ptr::from_ref(svcs));
+        let init_st = ((*ev).initialize)(
+            out,
+            std::ptr::from_ref(host.portal()),
+            std::ptr::from_ref(host.services()),
+        );
         assert!(!init_st.is_null());
         let iv = (*init_st).vtable;
         assert_eq!(((*iv).get_code)(init_st), MONGO_EXTENSION_STATUS_OK);

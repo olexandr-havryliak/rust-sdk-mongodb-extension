@@ -11,6 +11,7 @@ COPY e2e-tests/e2e-extension ./e2e-tests/e2e-extension
 COPY e2e-tests/mongo-extension-fuzz ./e2e-tests/mongo-extension-fuzz
 COPY examples/fibonacci/fibonacci-extension ./examples/fibonacci/fibonacci-extension
 COPY examples/http-fetch/http-fetch-extension ./examples/http-fetch/http-fetch-extension
+COPY examples/data-federation/data-federation-extension ./examples/data-federation/data-federation-extension
 RUN cargo build -p http_fetch_extension --release
 
 FROM ${MONGO_IMAGE}

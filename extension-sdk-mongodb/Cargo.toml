@@ -2,12 +2,13 @@
 name = "extension-sdk-mongodb"
 version.workspace = true
 edition.workspace = true
-description = "Safe helpers and adapters for MongoDB server extension shared libraries"
+description = "Rust SDK for MongoDB Extensions — safe helpers, macros, and adapters for extension shared libraries"
 license.workspace = true
 
 [dependencies]
 extension-sys-mongodb = { path = "../extension-sys-mongodb" }
 bson = "2.15"
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 proptest = "1.5"
