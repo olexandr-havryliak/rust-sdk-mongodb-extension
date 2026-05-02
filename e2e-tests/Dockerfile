@@ -12,21 +12,23 @@ COPY e2e-tests/e2e-extension ./e2e-tests/e2e-extension
 COPY e2e-tests/mongo-extension-fuzz ./e2e-tests/mongo-extension-fuzz
 COPY examples/fibonacci/fibonacci-extension ./examples/fibonacci/fibonacci-extension
 COPY examples/http-fetch/http-fetch-extension ./examples/http-fetch/http-fetch-extension
-RUN cargo build -p e2e_extension --release
+RUN cargo build -p e2e_extension -p fibonacci_extension --release
 
 FROM ${MONGO_IMAGE}
 USER root
 RUN mkdir -p /etc/mongo/extensions /usr/local/lib/mongo-extensions
 COPY --from=builder /build/target/release/libe2e_extension.so /usr/local/lib/mongo-extensions/libe2e_extension.so
+COPY --from=builder /build/target/release/libfibonacci_extension.so /usr/local/lib/mongo-extensions/libfibonacci_extension.so
 RUN { \
       echo 'sharedLibraryPath: /usr/local/lib/mongo-extensions/libe2e_extension.so'; \
       echo 'e2eExtensionParam: from_extension_yaml'; \
     } > /etc/mongo/extensions/e2e.conf \
-    && chmod 644 /etc/mongo/extensions/e2e.conf \
-    && chmod 755 /usr/local/lib/mongo-extensions/libe2e_extension.so
+    && printf '%s\n' 'sharedLibraryPath: /usr/local/lib/mongo-extensions/libfibonacci_extension.so' > /etc/mongo/extensions/fibonacci.conf \
+    && chmod 644 /etc/mongo/extensions/e2e.conf /etc/mongo/extensions/fibonacci.conf \
+    && chmod 755 /usr/local/lib/mongo-extensions/libe2e_extension.so /usr/local/lib/mongo-extensions/libfibonacci_extension.so
 # Official image runs as `mongodb` (uid 999).
 RUN chown -R mongodb:mongodb /etc/mongo/extensions /usr/local/lib/mongo-extensions 2>/dev/null || \
     chown -R 999:999 /etc/mongo/extensions /usr/local/lib/mongo-extensions
 USER mongodb
 EXPOSE 27017
-CMD ["mongod", "--bind_ip_all", "--setParameter", "featureFlagExtensionsAPI=true", "--loadExtensions", "e2e"]
+CMD ["mongod", "--bind_ip_all", "--setParameter", "featureFlagExtensionsAPI=true", "--loadExtensions", "e2e,fibonacci"]

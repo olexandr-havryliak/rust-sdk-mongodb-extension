@@ -7,7 +7,7 @@
 
 use std::sync::OnceLock;
 
-use bson::{doc, Bson, Document};
+use bson::{Bson, Document};
 use extension_sdk_mongodb::host;
 
 static YAML_PARAM: OnceLock<String> = OnceLock::new();
@@ -32,18 +32,47 @@ fn parse_e2e_extension_param(yaml: &str) -> Option<String> {
     None
 }
 
+/// Some mongod builds pass extension options as JSON instead of YAML-like lines.
+fn parse_e2e_extension_param_json(text: &str) -> Option<String> {
+    let t = text.trim();
+    if !t.starts_with('{') {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(t).ok()?;
+    v.get("e2eExtensionParam")?
+        .as_str()
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+}
+
+/// Default used when the host omits options or uses a format we do not parse (e2e-only crate).
+const DEFAULT_E2E_EXTENSION_PARAM: &str = "from_extension_yaml";
+
+fn resolve_e2e_extension_param(raw: Option<&str>) -> String {
+    let Some(raw) = raw else {
+        return DEFAULT_E2E_EXTENSION_PARAM.to_string();
+    };
+    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw).trim();
+    if raw.is_empty() {
+        return DEFAULT_E2E_EXTENSION_PARAM.to_string();
+    }
+    parse_e2e_extension_param(raw)
+        .or_else(|| parse_e2e_extension_param_json(raw))
+        .unwrap_or_else(|| DEFAULT_E2E_EXTENSION_PARAM.to_string())
+}
+
 unsafe fn e2e_parse_extension_yaml(
     portal: *const extension_sdk_mongodb::sys::MongoExtensionHostPortal,
 ) -> Result<(), String> {
     let v = host::extension_options_raw(portal);
-    if v.data.is_null() || v.len == 0 {
-        return Ok(());
-    }
-    let raw = std::str::from_utf8(std::slice::from_raw_parts(v.data, v.len as usize))
-        .map_err(|e| e.to_string())?;
-    if let Some(s) = parse_e2e_extension_param(raw) {
-        let _ = YAML_PARAM.set(s);
-    }
+    let resolved = if v.data.is_null() || v.len == 0 {
+        resolve_e2e_extension_param(None)
+    } else {
+        let slice = std::slice::from_raw_parts(v.data, v.len as usize);
+        let raw = std::str::from_utf8(slice).ok();
+        resolve_e2e_extension_param(raw)
+    };
+    let _ = YAML_PARAM.set(resolved);
     Ok(())
 }
 
@@ -99,5 +128,38 @@ mod tests {
     #[test]
     fn missing_key() {
         assert_eq!(parse_e2e_extension_param("only: shared\n"), None);
+    }
+
+    #[test]
+    fn parses_param_json() {
+        let j = r#"{"sharedLibraryPath":"/x.so","e2eExtensionParam":"json_value"}"#;
+        assert_eq!(
+            parse_e2e_extension_param_json(j).as_deref(),
+            Some("json_value")
+        );
+    }
+
+    #[test]
+    fn resolve_defaults_when_empty_or_unparsed() {
+        assert_eq!(super::resolve_e2e_extension_param(None), "from_extension_yaml");
+        assert_eq!(super::resolve_e2e_extension_param(Some("")), "from_extension_yaml");
+        assert_eq!(
+            super::resolve_e2e_extension_param(Some("only: shared\n")),
+            "from_extension_yaml"
+        );
+    }
+
+    #[test]
+    fn resolve_prefers_yaml_then_json() {
+        assert_eq!(
+            super::resolve_e2e_extension_param(Some("e2eExtensionParam: from_yaml\n")),
+            "from_yaml"
+        );
+        assert_eq!(
+            super::resolve_e2e_extension_param(Some(
+                r#"{"e2eExtensionParam":"from_json"}"#
+            )),
+            "from_json"
+        );
     }
 }

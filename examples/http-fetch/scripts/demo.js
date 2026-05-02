@@ -1,16 +1,14 @@
 // Run: mongosh --port 27021 /scripts/demo.js  (inside container: mongosh /scripts/demo.js)
 const d = db.getSiblingDB("http_fetch_demo");
 d.dropDatabase();
-d.createCollection("_e");
-const scratch = d.getCollection("_e");
+d.createCollection("n");
 
-const rows = scratch
+const rows = d.n
   .aggregate([
     {
       $httpFetch: {
         url: "https://example.com/",
         maxBytes: 65536,
-        timeoutMs: 15000,
       },
     },
   ])
@@ -39,4 +37,5 @@ if (typeof r.body !== "string" || r.body.indexOf("Example Domain") < 0) {
 }
 
 print("DEMO_OK");
+print('Try: use http_fetch_demo; db.createCollection("n"); db.n.aggregate([{ $httpFetch: { url: \'https://example.com/\', maxBytes: 65536 } }])');
 quit(0);

@@ -1,96 +1,71 @@
-# rust-sdk-mongodb-extension
+# Rust SDK for MongoDB Extensions
 
-Rust crates for building **MongoDB server extensions** (dynamic `*.so` plugins) against the
-versioned C ABI in [`include/mongodb_extension_api.h`](include/mongodb_extension_api.h) (vendored
-from MongoDB / Percona Server `src/mongo/db/extension/public/api.h`).
+Rust workspace that ships **`extension-sdk-mongodb`**, the **Rust SDK for MongoDB Extensions**: libraries and macros for building **MongoDB server extensions**—`cdylib` plugins loaded by `mongod` that register aggregation stages behind the versioned C ABI in [`include/mongodb_extension_api.h`](include/mongodb_extension_api.h) (vendored from MongoDB’s public extension API).
+
+The same repository also contains **sample extensions** and a **test harness**; those are documented separately so this file stays focused on the SDK crates.
+
+**MongoDB Extensions ABI:** this tree targets the vendored C API **version 0.1** (`MONGODB_EXTENSION_API_MAJOR_VERSION` **0**, `MONGODB_EXTENSION_API_MINOR_VERSION` **1** in [`include/mongodb_extension_api.h`](include/mongodb_extension_api.h)). Extensions built with the SDK advertise that pair at load time; the server must report a compatible slot in its extension API version vector (see [`extension-sdk-mongodb/src/version.rs`](extension-sdk-mongodb/src/version.rs)).
 
 ## Crates
 
 | Crate | Role |
 |--------|------|
-| `extension-sys-mongodb` | `#[repr(C)]` definitions mirroring the public API |
-| `extension-sdk-mongodb` | BSON helpers, status/byte-buffer adapters, `export_transform_stage!`, `export_map_transform_stage!` |
+| [`extension-sys-mongodb`](extension-sys-mongodb) | `#[repr(C)]` types and constants mirroring the host ABI |
+| [`extension-sdk-mongodb`](extension-sdk-mongodb) | Status and byte-buffer helpers, panic-safe FFI shims, macros to export stages, BSON utilities, and typed errors for stage logic |
 
-## Usage
+Depend on **`extension-sdk-mongodb`** from your extension crate; you normally do not need to depend on `extension-sys-mongodb` directly unless you are touching low-level symbols.
 
-1. Depend on `extension-sdk-mongodb` and set `[lib] crate-type = ["cdylib"]` in your extension crate.
-2. Export exactly one unmangled symbol `get_mongodb_extension` via the macro:
+## Capabilities
+
+The **Rust SDK for MongoDB Extensions** exposes macros that generate a single exported symbol, **`get_mongodb_extension`**, for the host to `dlsym`:
+
+- **`export_transform_stage!`** — passthrough transform: documents pass upstream unchanged (optional empty stage document).
+- **`export_map_transform_stage!`** — per-document map with optional **EOF-with-no-rows** path and optional **`initialize`** hook (extension YAML / portal).
+- **`export_source_stage!`** — **generator** source stage when there is no upstream executable stage (e.g. empty collection with only your stage).
+
+Typed arguments and errors are built around **`ExtensionError`**, **`parse_args`** (serde + BSON), and conversion to host status objects. See the crate root in [`extension-sdk-mongodb/src/lib.rs`](extension-sdk-mongodb/src/lib.rs) and module-level docs under `extension-sdk-mongodb/src/`.
+
+## Using the Rust SDK for MongoDB Extensions in your extension
+
+1. Add a path or crates.io dependency on **`extension-sdk-mongodb`**.
+2. Set **`[lib] crate-type = ["cdylib"]`** so the compiler produces a shared library the server can load.
+3. Invoke exactly **one** of the `export_*` macros so the unmangled **`get_mongodb_extension`** entry point exists.
+4. Install the produced `*.so` and matching extension **`*.conf`** according to MongoDB’s extension host documentation for your server build.
+
+Minimal passthrough example:
 
 ```rust
 extension_sdk_mongodb::export_transform_stage!("$myRustPass", true);
 ```
 
-Use a unique stage name. With `true`, the stage document must be empty (e.g. `{ "$myRustPass": {} }`).
+Use a **unique** stage name. With `true`, the inner stage document must be empty, e.g. `{ "$myRustPass": {} }`.
 
-3. Install the shared library and a matching `*.conf` under the server’s extension config directory
-   (see MongoDB extension host docs).
+## Building the Rust SDK for MongoDB Extensions
 
-The bundled **passthrough** implementation forwards input documents from the upstream stage
-unchanged (similar in spirit to the C++ `TestExecStage` used in server tests).
-
-## Building
-
-With a local toolchain:
+With a host toolchain (Rust **1.85+** recommended for the current dependency graph):
 
 ```bash
 cargo build -p extension-sdk-mongodb --release
 ```
 
-Or only Docker (no host Rust):
+Without installing Rust locally, you can compile from a container (repository root mounted at `/build`):
 
 ```bash
 docker run --rm -v "$PWD:/build" -w /build rust:bookworm \
   cargo build -p extension-sdk-mongodb --release
 ```
 
-Rust **1.85+** is recommended when using a host toolchain (current `bson` / `time` dependency graph).
+## Outside this README
 
-## End-to-end tests (Docker + MongoDB 8.3)
+| Topic | Where |
+|--------|--------|
+| Runnable **demo extensions** (Docker, mongosh, ports) | [`examples/README.md`](examples/README.md) |
 
-See [`e2e-tests/README.md`](e2e-tests/README.md). Quick run:
-
-```bash
-chmod +x e2e-tests/run-e2e.sh
-./e2e-tests/run-e2e.sh
-```
-
-This builds a sample `cdylib`, layers it on `mongo:8.3-rc-noble` (override with `MONGO_IMAGE=...`), starts `mongod` with the Extensions API flag, and runs `$rustSdkE2e` in an aggregation pipeline (including **extension YAML** `e2eExtensionParam`, explain, non-empty stage args, a downstream stage, and an empty-collection EOF path).
-
-Rust unit tests (SDK `api_coverage` + `e2e_extension` lib tests, plus a compile check of the Mongo fuzz driver) run **in Docker** so you do not need a host Rust toolchain:
-
-```bash
-chmod +x e2e-tests/run-sdk-tests-docker.sh
-./e2e-tests/run-sdk-tests-docker.sh
-```
-
-Optional **random aggregation fuzz** against the same Docker `mongod`: [`e2e-tests/run-fuzz-e2e.sh`](e2e-tests/run-fuzz-e2e.sh) (see [`e2e-tests/README.md`](e2e-tests/README.md)).
-
-**Miri** (memory / `unsafe` checks on SDK tests in Docker): [`e2e-tests/run-miri-docker.sh`](e2e-tests/run-miri-docker.sh) and [`.github/workflows/miri.yml`](.github/workflows/miri.yml).
-
-## Example: Fibonacci stage (Docker + 8.3)
-
-See [`examples/fibonacci/README.md`](examples/fibonacci/README.md) (index: [`examples/README.md`](examples/README.md)). Builds a `$fibonacci` map stage and runs it against `mongo:8.3-rc-noble` on port **27018**:
-
-```bash
-chmod +x examples/fibonacci/run-demo.sh
-./examples/fibonacci/run-demo.sh          # automated demo then teardown
-./examples/fibonacci/run-demo.sh up       # start MongoDB on port 27018 and keep it running
-./examples/fibonacci/run-demo.sh down     # stop the example stack
-```
-
-## Example: HTTP fetch (`$httpFetch`, curl-like GET)
-
-See [`examples/http-fetch/README.md`](examples/http-fetch/README.md). Fetches a URL over HTTP(S) inside the extension and returns the response in one EOF document (**demo only** — SSRF risk). Docker demo on port **27021**:
-
-```bash
-chmod +x examples/http-fetch/run-demo.sh
-./examples/http-fetch/run-demo.sh
-```
-
-More examples live under [`examples/`](examples/README.md).
+Quick **`mongosh`** smoke after each example’s **`run-demo.sh up`** (see [`examples/README.md`](examples/README.md) for ports): Fibonacci **`use fibonacci_demo; db.createCollection("n"); db.n.aggregate([{ $fibonacci: { n: 10 } }])`**. HTTP fetch **`use http_fetch_demo; db.createCollection("n"); db.n.aggregate([{ $httpFetch: { url: "https://example.com/", maxBytes: 65536 } }])`** (outbound HTTPS from the container).
+| **Tests**, CI-style Rust runs, e2e against real `mongod`, fuzz, Miri, debugging | [`e2e-tests/README.md`](e2e-tests/README.md) |
 
 ## License
 
-The vendored `api.h` header remains under the [Server Side Public License (SSPL)](https://www.mongodb.com/licensing/server-side-public-license)
-as in the upstream MongoDB source. Treat your combined extension artifact as subject to that
-header’s license terms where applicable.
+Rust crates and other original material in this repository are licensed under the **[MIT License](LICENSE)** (SPDX: `MIT`).
+
+The vendored C header [`include/mongodb_extension_api.h`](include/mongodb_extension_api.h) is **not** under MIT: it remains under the **[Server Side Public License, v1 (SSPL-1.0)](https://www.mongodb.com/licensing/server-side-public-license)** as in the upstream MongoDB source. See **[`NOTICE`](NOTICE)** for attribution and compliance when you ship or link that file.

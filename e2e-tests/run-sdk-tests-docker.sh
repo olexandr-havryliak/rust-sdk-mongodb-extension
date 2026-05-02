@@ -8,16 +8,13 @@ cd "$ROOT"
 
 IMAGE="${RUST_TEST_IMAGE:-rust:bookworm}"
 
-echo "==> Running Rust tests in ${IMAGE} (mounted ${ROOT})..."
+echo "==> Running workspace Rust tests in ${IMAGE} (mounted ${ROOT})..."
 docker run --rm \
   -v "${ROOT}:/build" \
   -w /build \
   "${IMAGE}" \
   bash -c 'set -euo pipefail
-    cargo test -p extension-sdk-mongodb --tests
-    cargo test -p e2e_extension --lib
-    cargo test -p http_fetch_extension --lib
-    cargo check -p mongo_extension_fuzz
+    cargo test --workspace
   '
 
 echo "==> SDK Rust tests passed (Docker)."

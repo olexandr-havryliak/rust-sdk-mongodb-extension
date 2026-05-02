@@ -683,6 +683,9 @@ unsafe extern "C" fn ext_init(
 ) -> *mut MongoExtensionStatus {
     let r = ffi_boundary(|| -> Result<(), String> {
         host::set_host_services(services);
+        unsafe {
+            host::cache_extension_options_from_portal(portal);
+        }
         let ext = EXTENSION_OBJ_ADDR
             .get()
             .copied()

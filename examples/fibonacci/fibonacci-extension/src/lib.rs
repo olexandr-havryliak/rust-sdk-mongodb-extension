@@ -1,90 +1,139 @@
-//! Example extension: stage `$fibonacci: { n: <count> }` adds a `fibonacci` array field to each document.
+//! Example extension: generator stage **`$fibonacci: { n: <count> }`**.
 //!
-//! When the upstream collection yields **no documents** (e.g. `aggregate` on an empty collection with
-//! only this stage), emits **one** document `{ fibonacci: [...], fibonacci_n: n }`, matching a typical
-//! C++ “generator” style `$fibonacci` implementation.
+//! Emits documents `{ i, value }` for the Fibonacci sequence (indices `0..n`, capped at 10 000).
+//! Works as the sole stage on **`aggregate: 1`** (no collection required).
 
-use bson::{doc, Bson, Document};
+use bson::{doc, Document};
+use extension_sdk_mongodb::{
+    export_source_stage, parse_args, ExtensionError, ExtensionResult, Next, SourceStage, StageContext,
+};
+use serde::Deserialize;
 
-fn fibonacci_prefix(count: usize) -> Vec<i64> {
-    match count {
-        0 => vec![],
-        1 => vec![0],
-        _ => {
-            let mut v = vec![0i64, 1];
-            while v.len() < count {
-                let next = v[v.len() - 2].saturating_add(v[v.len() - 1]);
-                v.push(next);
-            }
-            v
+/// Parsed stage arguments (after BSON / serde decode and clamping).
+#[derive(Debug, Clone)]
+pub struct FibArgs {
+    n: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct FibonacciArgs {
+    n: u64,
+}
+
+/// Generator state: current index and next two Fibonacci values.
+#[derive(Debug)]
+pub struct FibState {
+    i: usize,
+    n: usize,
+    a: i64,
+    b: i64,
+}
+
+pub struct Fibonacci;
+
+impl SourceStage for Fibonacci {
+    const NAME: &'static str = "$fibonacci";
+    type Args = FibArgs;
+    type State = FibState;
+
+    fn parse(args: Document) -> ExtensionResult<Self::Args> {
+        let FibonacciArgs { n } = parse_args(args)?;
+        let n = usize::try_from(n).unwrap_or(usize::MAX).min(10_000);
+        Ok(FibArgs { n })
+    }
+
+    fn open(args: Self::Args, _ctx: &mut StageContext) -> ExtensionResult<Self::State> {
+        if args.n == 0 {
+            return Ok(FibState {
+                i: 0,
+                n: 0,
+                a: 0,
+                b: 0,
+            });
         }
+        Ok(FibState {
+            i: 0,
+            n: args.n,
+            a: 0,
+            b: 1,
+        })
+    }
+
+    fn next(state: &mut Self::State, ctx: &mut StageContext) -> ExtensionResult<Next> {
+        if state.i >= state.n {
+            return Ok(Next::Eof);
+        }
+        let value = state.a;
+        let out = doc! { "i": state.i as i64, "value": value };
+        state.i += 1;
+        let nb = state.a.saturating_add(state.b);
+        state.a = state.b;
+        state.b = nb;
+        ctx.metrics().inc("rows_out", 1);
+        Ok(Next::Advanced {
+            document: out,
+            metadata: None,
+        })
     }
 }
 
-fn n_from_args(args: &Document) -> Result<usize, String> {
-    match args.get("n") {
-        Some(Bson::Int32(i)) if *i >= 0 => Ok(*i as usize),
-        Some(Bson::Int64(i)) if *i >= 0 => Ok(*i as usize),
-        Some(Bson::Double(f)) if *f >= 0.0 && f.is_finite() && (*f - f.round()).abs() < f64::EPSILON => Ok(*f as usize),
-        Some(Bson::Int32(_)) | Some(Bson::Int64(_)) | Some(Bson::Double(_)) => Err(r#""n" must be non-negative"#.into()),
-        _ => Err(r#"stage requires integer field "n" (e.g. { $fibonacci: { n: 10 } })"#.into()),
-    }
-}
-
-/// Shared sequence + effective `n` (after cap).
-fn fib_payload(args: &Document) -> Result<(Vec<Bson>, i64), String> {
-    let n = n_from_args(args)?;
-    let cap = (n.min(10_000)) as i64;
-    let seq = fibonacci_prefix(cap as usize);
-    let arr: Vec<Bson> = seq.into_iter().map(Bson::Int64).collect();
-    Ok((arr, cap))
-}
-
-/// One synthetic row when there are no input documents (empty collection / EOF before first advance).
-fn fib_eof(args: &Document) -> Result<Document, String> {
-    let (arr, cap) = fib_payload(args)?;
-    Ok(doc! {
-        "fibonacci": arr,
-        "fibonacci_n": cap,
-    })
-}
-
-fn fib_map(row: &Document, args: &Document) -> Result<Document, String> {
-    let (arr, cap) = fib_payload(args)?;
-    let mut out = row.clone();
-    out.insert("fibonacci", Bson::Array(arr));
-    out.insert("fibonacci_n", Bson::Int64(cap));
-    Ok(out)
-}
-
-extension_sdk_mongodb::export_map_transform_stage!("$fibonacci", false, fib_map, fib_eof);
+export_source_stage!(Fibonacci);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn fibonacci_prefix_values() {
-        assert!(fibonacci_prefix(0).is_empty());
-        assert_eq!(fibonacci_prefix(1), vec![0]);
-        assert_eq!(fibonacci_prefix(2), vec![0, 1]);
-        assert_eq!(fibonacci_prefix(8), vec![0, 1, 1, 2, 3, 5, 8, 13]);
+    fn parse_invalid_n_type_is_failed_to_parse() {
+        let e = Fibonacci::parse(doc! { "n": "x" }).unwrap_err();
+        assert!(matches!(e, ExtensionError::FailedToParse(_)));
     }
 
     #[test]
-    fn fib_map_adds_sequence() {
-        let row = doc! { "x": 1 };
-        let args = doc! { "n": 5 };
-        let out = fib_map(&row, &args).expect("ok");
-        assert_eq!(out.get_i32("x").expect("x"), 1);
-        assert_eq!(out.get_i64("fibonacci_n").expect("n"), 5);
+    fn parse_missing_n_is_failed_to_parse() {
+        let e = Fibonacci::parse(doc! {}).unwrap_err();
+        assert!(matches!(e, ExtensionError::FailedToParse(_)));
     }
 
     #[test]
-    fn fib_eof_is_standalone_payload() {
-        let args = doc! { "n": 4 };
-        let out = fib_eof(&args).expect("ok");
-        assert!(out.get("x").is_none());
-        assert_eq!(out.get_i64("fibonacci_n").expect("n"), 4);
+    fn parse_negative_n_is_failed_to_parse() {
+        let e = Fibonacci::parse(doc! { "n": -1 }).unwrap_err();
+        assert!(matches!(e, ExtensionError::FailedToParse(_)));
+    }
+
+    #[test]
+    fn parse_clamps_over_10k() {
+        let args = Fibonacci::parse(doc! { "n": 50_000i64 }).expect("parse");
+        assert_eq!(args.n, 10_000);
+    }
+
+    #[test]
+    fn parse_and_emit_ten() {
+        let args = Fibonacci::parse(doc! { "n": 10 }).expect("parse");
+        let mut st = Fibonacci::open(args, &mut StageContext::new()).expect("open");
+        let mut rows = Vec::new();
+        let mut ctx = StageContext::new();
+        loop {
+            match Fibonacci::next(&mut st, &mut ctx).expect("next") {
+                Next::Eof => break,
+                Next::Advanced { document, .. } => rows.push(document),
+            }
+        }
+        assert_eq!(rows.len(), 10);
+        assert_eq!(rows[0], doc! { "i": 0i64, "value": 0i64 });
+        assert_eq!(rows[1], doc! { "i": 1i64, "value": 1i64 });
+        assert_eq!(rows[2], doc! { "i": 2i64, "value": 1i64 });
+        assert_eq!(rows[3], doc! { "i": 3i64, "value": 2i64 });
+    }
+
+    #[test]
+    fn n_zero_emits_nothing() {
+        let args = Fibonacci::parse(doc! { "n": 0 }).expect("parse");
+        let mut st = Fibonacci::open(args, &mut StageContext::new()).expect("open");
+        let mut ctx = StageContext::new();
+        assert!(matches!(
+            Fibonacci::next(&mut st, &mut ctx).expect("next"),
+            Next::Eof
+        ));
     }
 }

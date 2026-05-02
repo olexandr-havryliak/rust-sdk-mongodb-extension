@@ -1,0 +1,12 @@
+Third-party material
+====================
+
+The file `include/mongodb_extension_api.h` is vendored from MongoDB source. It
+is licensed under the Server Side Public License, v1
+(SSPL-1.0), not under the MIT license that applies to the rest of this
+repository. See the file header and:
+https://www.mongodb.com/licensing/server-side-public-license
+
+When you build or distribute artifacts that incorporate that header, comply
+with its license terms in addition to the MIT terms for the surrounding Rust
+code.

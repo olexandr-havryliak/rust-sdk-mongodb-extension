@@ -5,7 +5,7 @@ mod common;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bson::{doc, Document};
-use common::{leak_portal_and_services, mock_register_ok};
+use common::{mock_register_ok, MockHost};
 use extension_sdk_mongodb::map_transform::{get_map_extension_impl, MapStageGlobals};
 use extension_sdk_mongodb::sys::{
     MongoExtension, MongoExtensionAPIVersion, MongoExtensionAPIVersionVector, MONGO_EXTENSION_STATUS_OK,
@@ -27,23 +27,24 @@ fn eof(args: &Document) -> Result<Document, String> {
     Ok(doc! { "eof": true, "n": args.get("n").cloned().unwrap_or(bson::Bson::Null) })
 }
 
-fn compatible_vec() -> (MongoExtensionAPIVersionVector, [MongoExtensionAPIVersion; 1]) {
-    let mut slots = [MongoExtensionAPIVersion {
-        major: EXTENSION_API_VERSION.major,
-        minor: EXTENSION_API_VERSION.minor,
-    }];
-    let v = MongoExtensionAPIVersionVector {
+/// Build a host version vector pointing at `slots`. `slots` must outlive the returned struct
+/// (do not build the vector inside a helper that then moves `slots` — the raw pointer would dangle).
+fn compatible_vec(slots: &mut [MongoExtensionAPIVersion; 1]) -> MongoExtensionAPIVersionVector {
+    MongoExtensionAPIVersionVector {
         len: 1,
         versions: slots.as_mut_ptr(),
-    };
-    (v, slots)
+    }
 }
 
 #[test]
 fn map_initialize_runs_on_extension_initialized_then_register() {
     INIT_HOOK_RAN.store(false, Ordering::SeqCst);
-    let (portal, svcs) = leak_portal_and_services(mock_register_ok);
-    let (vec, _slots) = compatible_vec();
+    let host = MockHost::new(mock_register_ok);
+    let mut slots = [MongoExtensionAPIVersion {
+        major: EXTENSION_API_VERSION.major,
+        minor: EXTENSION_API_VERSION.minor,
+    }];
+    let vec = compatible_vec(&mut slots);
     let globals = MapStageGlobals {
         name: "$mapSdkInitTest",
         expect_empty: false,
@@ -65,7 +66,11 @@ fn map_initialize_runs_on_extension_initialized_then_register() {
         assert!(!out.is_null(), "extension pointer");
 
         let ev = (*out).vtable;
-        let init_st = ((*ev).initialize)(out, std::ptr::from_ref(portal), std::ptr::from_ref(svcs));
+        let init_st = ((*ev).initialize)(
+            out,
+            std::ptr::from_ref(host.portal()),
+            std::ptr::from_ref(host.services()),
+        );
         assert!(!init_st.is_null());
         let iv = (*init_st).vtable;
         assert_eq!(((*iv).get_code)(init_st), MONGO_EXTENSION_STATUS_OK);

@@ -358,6 +358,7 @@ version = "0.1.0"
 dependencies = [
  "bson",
  "extension-sdk-mongodb",
+ "serde_json",
 ]
 
 [[package]]
@@ -395,6 +396,7 @@ dependencies = [
  "bson",
  "extension-sys-mongodb",
  "proptest",
+ "serde",
 ]
 
 [[package]]
@@ -413,6 +415,7 @@ version = "0.1.0"
 dependencies = [
  "bson",
  "extension-sdk-mongodb",
+ "serde",
 ]
 
 [[package]]

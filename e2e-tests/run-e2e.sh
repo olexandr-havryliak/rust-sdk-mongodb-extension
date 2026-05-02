@@ -51,4 +51,35 @@ if ! grep -q '^E2E_OK$' <<<"$out"; then
   exit 1
 fi
 
+echo "==> Running \$fibonacci SourceStage e2e (no upstream / empty upstream / non-empty upstream)..."
+set +e
+fib="$("${COMPOSE[@]}" exec -T mongo mongosh --quiet /scripts/fibonacci_source_e2e.js 2>&1)"
+frc=$?
+set -e
+if [[ "$frc" -ne 0 ]]; then
+  echo "$fib"
+  echo "mongosh fibonacci e2e exited with code $frc"
+  exit "$frc"
+fi
+if ! grep -q '^FIBONACCI_SOURCE_OK$' <<<"$fib"; then
+  echo "$fib"
+  echo "Expected FIBONACCI_SOURCE_OK in mongosh output"
+  exit 1
+fi
+if ! grep -q '^SOURCE_STAGE_EMPTY_UPSTREAM_OK$' <<<"$fib"; then
+  echo "$fib"
+  echo "Expected SOURCE_STAGE_EMPTY_UPSTREAM_OK in mongosh output"
+  exit 1
+fi
+if ! grep -q '^SOURCE_STAGE_NONEMPTY_UPSTREAM_OK$' <<<"$fib"; then
+  echo "$fib"
+  echo "Expected SOURCE_STAGE_NONEMPTY_UPSTREAM_OK in mongosh output"
+  exit 1
+fi
+if ! grep -qE '^SOURCE_STAGE_NO_UPSTREAM_(OK|SKIPPED)' <<<"$fib"; then
+  echo "$fib"
+  echo "Expected SOURCE_STAGE_NO_UPSTREAM_OK or SOURCE_STAGE_NO_UPSTREAM_SKIPPED in mongosh output"
+  exit 1
+fi
+
 echo "==> E2E passed."

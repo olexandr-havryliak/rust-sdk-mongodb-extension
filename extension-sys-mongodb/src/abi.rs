@@ -86,7 +86,7 @@ pub enum MongoExtensionLogSeverity {
 }
 
 #[repr(u32)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MongoExtensionLogType {
     kLog = 0,
     kDebug = 1,

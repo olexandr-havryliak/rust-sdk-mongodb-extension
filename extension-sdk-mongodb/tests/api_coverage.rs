@@ -1,6 +1,6 @@
 //! Exercises public helpers (version, status, byte_buf, host, panics) and mocked host entrypoints.
 //!
-//! See also: `tests/common/mod.rs` (shared mocks), `map_extension_*.rs`, `passthrough_extension_init.rs`,
+//! See also: `tests/common/mod.rs` (`MockHost`), `map_extension_*.rs`, `passthrough_extension_init.rs`,
 //! `proptest_byte_buf_roundtrip.rs`. Map/passthrough **initialize** paths run here with mocks; full
 //! pipelines against `mongod` stay in Docker e2e. **Miri** (undefined-behavior checks on `unsafe`):
 //! `./e2e-tests/run-miri-docker.sh` (skips proptest binary).
@@ -243,26 +243,25 @@ fn host_set_services_vtable_register_and_extension_options() {
         create_id_lookup: mock_create_id_lookup,
     };
 
-    // `MongoExtensionHostPortal` is not `Sync` (raw pointers); leak mocks so the test stays self-contained.
-    let portal = Box::leak(Box::new(MongoExtensionHostPortal {
+    let portal = MongoExtensionHostPortal {
         vtable: &HOST_PORTAL_VTABLE,
         host_extensions_api_version: EXTENSION_API_VERSION,
         host_mongodb_max_wire_version: 0,
-    }));
-    let svcs = Box::leak(Box::new(MongoExtensionHostServices {
+    };
+    let svcs = MongoExtensionHostServices {
         vtable: &HOST_SVCS_VTABLE,
-    }));
+    };
 
-    host::set_host_services(std::ptr::from_ref(svcs));
+    host::set_host_services(std::ptr::from_ref(&svcs));
     let vt = host::host_services_vtable().expect("vtable after set");
     assert_eq!(vt as *const _, std::ptr::from_ref(&HOST_SVCS_VTABLE));
 
     unsafe {
-        let view = host::extension_options_raw(std::ptr::from_ref(portal));
+        let view = host::extension_options_raw(std::ptr::from_ref(&portal));
         let slice = std::slice::from_raw_parts(view.data, view.len as usize);
         assert!(slice.starts_with(b"sharedLibraryPath:"));
 
-        let st = host::register_stage_descriptor(std::ptr::from_ref(portal), std::ptr::null());
+        let st = host::register_stage_descriptor(std::ptr::from_ref(&portal), std::ptr::null());
         assert!(!st.is_null());
         let svt = (*st).vtable;
         assert_eq!(((*svt).get_code)(st), MONGO_EXTENSION_STATUS_OK);

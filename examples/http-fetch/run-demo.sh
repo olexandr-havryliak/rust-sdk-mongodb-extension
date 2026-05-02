@@ -58,8 +58,7 @@ case "$cmd" in
     echo "==> Ready. Connect:"
     echo "    mongosh --port 27021"
     echo "  Example (requires outbound HTTPS from the container):"
-    echo "    use http_fetch_demo; db.createCollection('_e');"
-    echo "    db.getCollection('_e').aggregate([ { \\\$httpFetch: { url: 'https://example.com/', maxBytes: 65536 } } ])"
+    echo "    use http_fetch_demo; db.createCollection(\"n\"); db.n.aggregate([{ \\\$httpFetch: { url: 'https://example.com/', maxBytes: 65536 } }])"
     echo "  Stop:"
     echo "    $0 down"
     exit 0
@@ -100,6 +99,7 @@ case "$cmd" in
     fi
 
     echo "==> Demo passed. Try: mongosh --port 27021"
+    echo "    use http_fetch_demo; db.createCollection(\"n\"); db.n.aggregate([{ \\\$httpFetch: { url: 'https://example.com/', maxBytes: 65536 } }])"
     exit 0
     ;;
   *)

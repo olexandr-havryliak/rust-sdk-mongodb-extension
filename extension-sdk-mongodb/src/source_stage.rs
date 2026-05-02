@@ -1,74 +1,87 @@
-//! **Map transform** stage: parses `{$stageName: <args>}`, pulls documents from the upstream
-//! executable stage, then applies a Rust `fn(&Document, &Document) -> Result<Document, String>` where
-//! the second document is the stage argument object.
+//! **Source** (generator) aggregation stage: parses `{$stageName: <args>}` and emits documents from
+//! Rust without requiring an upstream executable stage (e.g. `aggregate: 1` with only this stage).
 //!
-//! Optionally, `MapStageGlobals.on_eof_no_rows` supplies a `fn(&Document) -> Result<Document, String>`
-//! invoked once when upstream hits EOF before any row (empty collection), so the stage can emit
-//! output from arguments alone.
+//! When an upstream stage is present (`set_source` was called), this implementation **forwards**
+//! `get_next` to that upstream stage unchanged (passthrough).
 //!
-//! Use [`export_map_transform_stage!`](crate::export_map_transform_stage) from the crate root.
+//! Use [`export_source_stage!`](crate::export_source_stage) from the crate root.
 
 use std::cell::Cell;
+use std::ffi::c_void;
 use std::sync::OnceLock;
 
 use bson::Document;
 
 use crate::byte_buf;
+use crate::error::ExtensionError;
 use crate::host;
 use crate::panics::ffi_boundary;
+use crate::stage_context::StageContext;
+use crate::stage_output::Next;
 use crate::status;
 use crate::sys::{
     MongoExtension, MongoExtensionAggStageAstNode, MongoExtensionAggStageAstNodeVTable,
     MongoExtensionAggStageDescriptor, MongoExtensionAggStageDescriptorVTable,
-    MongoExtensionAggStageParseNode, MongoExtensionAggStageParseNodeVTable,
+    MongoExtensionAggStageParseNode, MongoExtensionAggStageParseNodeVTable, MongoExtensionAggStageNodeType,
+    MongoExtensionByteContainer, MongoExtensionByteContainerBytes, MongoExtensionByteContainerType,
     MongoExtensionByteView, MongoExtensionCatalogContext, MongoExtensionDistributedPlanLogic,
-    MongoExtensionExecAggStage, MongoExtensionExecAggStageVTable,     MongoExtensionExpandedArray,
+    MongoExtensionExecAggStage, MongoExtensionExecAggStageVTable, MongoExtensionExpandedArray,
     MongoExtensionExpandedArrayContainer, MongoExtensionExpandedArrayContainerVTable,
-    MongoExtensionExpandedArrayElementUnion,
-    MongoExtensionExplainVerbosity, MongoExtensionFirstStageViewApplicationPolicy,
-    MongoExtensionGetNextResult, MongoExtensionLogicalAggStage, MongoExtensionLogicalAggStageVTable,
-    MongoExtensionOperationMetrics, MongoExtensionOperationMetricsVTable,
-    MongoExtensionQueryExecutionContext, MongoExtensionStatus, MongoExtensionVTable,
-    MongoExtensionViewInfo,     MongoExtensionAggStageNodeType, MongoExtensionByteContainer, MongoExtensionByteContainerType,
-    MongoExtensionByteContainerBytes,
-    MongoExtensionGetNextResultCode,
+    MongoExtensionExpandedArrayElementUnion, MongoExtensionExplainVerbosity,
+    MongoExtensionFirstStageViewApplicationPolicy, MongoExtensionGetNextResult,
+    MongoExtensionGetNextResultCode, MongoExtensionLogicalAggStage, MongoExtensionLogicalAggStageVTable,
+    MongoExtensionOperationMetrics,
+    MongoExtensionQueryExecutionContext, MongoExtensionStatus, MongoExtensionVTable, MongoExtensionViewInfo,
 };
 use crate::version::{host_supports_extension, EXTENSION_API_VERSION};
 
-/// Stage name, parse options, and per-document map callback for `export_map_transform_stage!`.
-#[derive(Clone, Copy)]
-pub struct MapStageGlobals {
-    /// Stage key including leading `$`, e.g. `"$myMap"`.
+/// Erased hooks for a concrete [`SourceStage`], installed once per extension via
+/// [`export_source_stage!`](crate::export_source_stage).
+pub struct SourceOps {
+    /// Stage key including `$`, e.g. `"$fibonacci"`.
     pub name: &'static str,
-    /// If true, the inner document must be empty (like `$testFoo: {}`).
+    /// When true, the inner args object must be `{}`.
     pub expect_empty: bool,
-    /// Transform each advanced document: input row and stage args (from `{$name: args}`).
-    pub transform: fn(&Document, &Document) -> Result<Document, String>,
-    /// If set, called **once** when upstream reaches `kEOF` before any `kAdvanced` (e.g. empty
-    /// collection). Output is built from stage args only—useful for generator-style stages.
-    pub on_eof_no_rows: Option<fn(&Document) -> Result<Document, String>>,
-    /// If set, invoked during extension `initialize` while `portal` is valid (e.g. parse
-    /// [`host::extension_options_raw`](crate::host::extension_options_raw) YAML).
+    /// Parses args from BSON and allocates opaque state (`Box<State>` as `*mut c_void`).
+    pub open_from_doc: fn(Document, &mut StageContext) -> crate::error::Result<*mut c_void>,
+    /// Drops state allocated by [`SourceOps::open_from_doc`](SourceOps::open_from_doc).
+    pub drop_state: unsafe fn(*mut c_void),
+    /// Produces the next output row ([`Next::Advanced`](Next::Advanced)) or end-of-stream ([`Next::Eof`](Next::Eof)).
+    pub next: unsafe fn(*mut c_void, &mut StageContext) -> crate::error::Result<Next>,
+    /// Optional hook during extension `initialize` (portal valid for extension options).
     pub on_extension_initialized:
-        Option<unsafe fn(*const crate::sys::MongoExtensionHostPortal) -> Result<(), String>>,
+        Option<unsafe fn(*const crate::sys::MongoExtensionHostPortal) -> crate::error::Result<()>>,
 }
 
-static MAP_ACTIVE_STAGE: OnceLock<MapStageGlobals> = OnceLock::new();
+static ACTIVE_OPS: OnceLock<&'static SourceOps> = OnceLock::new();
 
-fn map_globals() -> MapStageGlobals {
-    *MAP_ACTIVE_STAGE.get().expect("map extension globals not installed")
-}
-
-fn name_bytes() -> &'static [u8] {
-    map_globals().name.as_bytes()
+fn active_ops() -> &'static SourceOps {
+    ACTIVE_OPS.get().expect("source stage ops not installed")
 }
 
 fn name_view() -> MongoExtensionByteView {
-    let b = name_bytes();
+    let b = active_ops().name.as_bytes();
     MongoExtensionByteView {
         data: b.as_ptr(),
         len: b.len() as u64,
     }
+}
+
+/// Implement this trait for a generator stage, then export it with [`export_source_stage!`](crate::export_source_stage).
+pub trait SourceStage: Sized + Send + 'static {
+    /// Stage key including leading `$`, must match BSON (`{ $name: <args> }`).
+    const NAME: &'static str;
+    /// Parsed stage arguments (from the inner object of `{ Self::NAME: <args> }`).
+    type Args;
+    /// Per-cursor mutable state between [`SourceStage::next`](SourceStage::next) calls.
+    type State;
+
+    /// Validates and decodes `args` into [`SourceStage::Args`](SourceStage::Args).
+    fn parse(args: Document) -> crate::error::Result<Self::Args>;
+    /// Called once before the first [`SourceStage::next`](SourceStage::next).
+    fn open(args: Self::Args, ctx: &mut StageContext) -> crate::error::Result<Self::State>;
+    /// Returns the next output row or end-of-stream.
+    fn next(state: &mut Self::State, ctx: &mut StageContext) -> crate::error::Result<Next>;
 }
 
 // --- Descriptor ---
@@ -88,29 +101,37 @@ unsafe extern "C" fn desc_parse(
     out_parse: *mut *mut MongoExtensionAggStageParseNode,
 ) -> *mut MongoExtensionStatus {
     *out_parse = std::ptr::null_mut();
-    let parsed = ffi_boundary(|| -> Result<*mut MongoExtensionAggStageParseNode, String> {
+    let parsed = ffi_boundary(|| -> crate::error::Result<*mut MongoExtensionAggStageParseNode> {
         let bytes = std::slice::from_raw_parts(stage_bson.data, stage_bson.len as usize);
-        let doc = Document::from_reader(bytes).map_err(|e| format!("parse bson: {e}"))?;
-        let g = map_globals();
-        let key = doc
-            .keys()
-            .next()
-            .ok_or_else(|| "stage document must have one field".to_string())?;
+        let doc = Document::from_reader(bytes)
+            .map_err(|e| ExtensionError::FailedToParse(format!("parse bson: {e}")))?;
+        let g = active_ops();
+        let key = doc.keys().next().ok_or_else(|| {
+            ExtensionError::BadValue("stage document must have one field".into())
+        })?;
         if key != g.name {
-            return Err(format!("expected stage {}, got {key}", g.name));
+            return Err(ExtensionError::BadValue(format!(
+                "expected stage {}, got {key}",
+                g.name
+            )));
         }
-        let args = doc.get_document(key).map_err(|e| e.to_string())?;
+        let args = doc
+            .get_document(key)
+            .map_err(|e| ExtensionError::BadValue(e.to_string()))?;
         if g.expect_empty && !args.is_empty() {
-            return Err("stage definition must be an empty object".into());
+            return Err(ExtensionError::BadValue(
+                "stage definition must be an empty object".into(),
+            ));
         }
         let mut arg_bytes = Vec::new();
-        args.to_writer(&mut arg_bytes).map_err(|e| e.to_string())?;
-        let p = Box::into_raw(Box::new(parse_alloc(arg_bytes)));
-        Ok(p.cast::<MongoExtensionAggStageParseNode>())
+        args.to_writer(&mut arg_bytes)
+            .map_err(|e| ExtensionError::FailedToParse(e.to_string()))?;
+        let p = Box::into_raw(Box::new(parse_alloc(arg_bytes))).cast::<MongoExtensionAggStageParseNode>();
+        Ok(p)
     });
     match parsed {
-        None => status::new_error_status(-1, "extension panic during parse"),
-        Some(Err(e)) => status::new_error_status(-1, e),
+        None => ExtensionError::Runtime("extension panic during parse".into()).into_raw_status(),
+        Some(Err(e)) => e.into_raw_status(),
         Some(Ok(p)) => {
             *out_parse = p;
             status::status_ok()
@@ -157,17 +178,18 @@ unsafe extern "C" fn parse_get_query_shape(
     out: *mut *mut crate::sys::MongoExtensionByteBuf,
 ) -> *mut MongoExtensionStatus {
     *out = std::ptr::null_mut();
-    let r = ffi_boundary(|| -> Result<*mut crate::sys::MongoExtensionByteBuf, String> {
+    let r = ffi_boundary(|| -> crate::error::Result<*mut crate::sys::MongoExtensionByteBuf> {
         let this = p.cast::<ParseObj>();
-        let g = map_globals();
+        let g = active_ops();
         let args_bytes: &[u8] = unsafe { &(*this).args };
-        let args = Document::from_reader(args_bytes).map_err(|e| e.to_string())?;
+        let args = Document::from_reader(args_bytes)
+            .map_err(|e| ExtensionError::FailedToParse(e.to_string()))?;
         let d = bson::doc! { g.name: args };
-        byte_buf::from_bson(&d).map_err(|e| e.to_string())
+        byte_buf::from_bson(&d).map_err(|e| ExtensionError::FailedToParse(e.to_string()))
     });
     match r {
-        None => status::new_error_status(-1, "panic during get_query_shape"),
-        Some(Err(e)) => status::new_error_status(-1, e),
+        None => ExtensionError::Runtime("panic during get_query_shape".into()).into_raw_status(),
+        Some(Err(e)) => e.into_raw_status(),
         Some(Ok(b)) => {
             *out = b;
             status::status_ok()
@@ -180,7 +202,7 @@ unsafe extern "C" fn parse_expand(
     out: *mut *mut MongoExtensionExpandedArrayContainer,
 ) -> *mut MongoExtensionStatus {
     *out = std::ptr::null_mut();
-    let r = ffi_boundary(|| -> Result<*mut MongoExtensionExpandedArrayContainer, String> {
+    let r = ffi_boundary(|| -> crate::error::Result<*mut MongoExtensionExpandedArrayContainer> {
         let this = p.cast::<ParseObj>();
         let args = (*this).args.clone();
         let ast = Box::into_raw(Box::new(ast_alloc(args))).cast::<MongoExtensionAggStageAstNode>();
@@ -188,8 +210,8 @@ unsafe extern "C" fn parse_expand(
         Ok(Box::into_raw(c).cast::<MongoExtensionExpandedArrayContainer>())
     });
     match r {
-        None => status::new_error_status(-1, "panic during expand"),
-        Some(Err(e)) => status::new_error_status(-1, e),
+        None => ExtensionError::Runtime("panic during expand".into()).into_raw_status(),
+        Some(Err(e)) => e.into_raw_status(),
         Some(Ok(c)) => {
             *out = c;
             status::status_ok()
@@ -212,13 +234,13 @@ unsafe extern "C" fn parse_to_bson_for_log(
     out: *mut *mut crate::sys::MongoExtensionByteBuf,
 ) -> *mut MongoExtensionStatus {
     let this = p.cast::<ParseObj>();
-    let g = map_globals();
+    let g = active_ops();
     let args_bytes: &[u8] = unsafe { &(*this).args };
     let args = match Document::from_reader(args_bytes) {
         Ok(d) => d,
         Err(_) => {
             *out = std::ptr::null_mut();
-            return status::new_error_status(-1, "log bson");
+            return ExtensionError::FailedToParse("log bson".into()).into_raw_status();
         }
     };
     let d = bson::doc! { g.name: args };
@@ -229,7 +251,7 @@ unsafe extern "C" fn parse_to_bson_for_log(
         }
         Err(e) => {
             *out = std::ptr::null_mut();
-            status::new_error_status(-1, e.to_string())
+            ExtensionError::FailedToParse(e.to_string()).into_raw_status()
         }
     }
 }
@@ -243,7 +265,7 @@ static PARSE_VTABLE: MongoExtensionAggStageParseNodeVTable = MongoExtensionAggSt
     to_bson_for_log: parse_to_bson_for_log,
 };
 
-// --- Expanded array container (single AST) ---
+// --- Expanded array ---
 
 #[repr(C)]
 struct ExpandedSingle {
@@ -283,13 +305,11 @@ unsafe extern "C" fn exp_transfer(
 ) -> *mut MongoExtensionStatus {
     let this = p.cast::<ExpandedSingle>();
     if (*arr).size != 1 {
-        return status::new_error_status(-1, "expanded array size mismatch");
+        return ExtensionError::BadValue("expanded array size mismatch".into()).into_raw_status();
     }
     let el = (*arr).elements;
     (*el).type_ = MongoExtensionAggStageNodeType::kAstNode;
-    (*el).parse_or_ast = MongoExtensionExpandedArrayElementUnion {
-        ast: (*this).ast,
-    };
+    (*el).parse_or_ast = MongoExtensionExpandedArrayElementUnion { ast: (*this).ast };
     (*this).transferred.set(true);
     status::status_ok()
 }
@@ -345,7 +365,7 @@ unsafe extern "C" fn ast_get_properties(
         }
         Err(e) => {
             *out = std::ptr::null_mut();
-            status::new_error_status(-1, e.to_string())
+            ExtensionError::FailedToParse(e.to_string()).into_raw_status()
         }
     }
 }
@@ -429,13 +449,13 @@ unsafe extern "C" fn log_serialize(
     out: *mut *mut crate::sys::MongoExtensionByteBuf,
 ) -> *mut MongoExtensionStatus {
     let this = p.cast::<LogicalObj>();
-    let g = map_globals();
+    let g = active_ops();
     let args_bytes: &[u8] = unsafe { &(*this).args };
     let args = match Document::from_reader(args_bytes) {
         Ok(d) => d,
         Err(_) => {
             *out = std::ptr::null_mut();
-            return status::new_error_status(-1, "serialize");
+            return ExtensionError::FailedToParse("serialize".into()).into_raw_status();
         }
     };
     let d = bson::doc! { g.name: args };
@@ -446,7 +466,7 @@ unsafe extern "C" fn log_serialize(
         }
         Err(e) => {
             *out = std::ptr::null_mut();
-            status::new_error_status(-1, e.to_string())
+            ExtensionError::FailedToParse(e.to_string()).into_raw_status()
         }
     }
 }
@@ -514,38 +534,46 @@ static LOGICAL_VTABLE: MongoExtensionLogicalAggStageVTable = MongoExtensionLogic
     set_vector_search_limit_for_optimization: log_vec_limit,
 };
 
-// --- Exec (map over upstream) ---
+// --- Exec ---
 
-fn document_from_byte_container(c: &MongoExtensionByteContainer) -> Result<Document, String> {
-    let bytes: &[u8] = match c.type_ {
-        MongoExtensionByteContainerType::kByteView => unsafe {
-            let v = c.bytes.view;
-            if v.len == 0 || v.data.is_null() {
-                &[]
-            } else {
-                std::slice::from_raw_parts(v.data, v.len as usize)
-            }
-        },
-        MongoExtensionByteContainerType::kByteBuf => unsafe {
-            let buf = c.bytes.buf;
-            if buf.is_null() {
-                return Err("null bytebuf in result_document".into());
-            }
-            let bvt = (*buf).vtable;
-            let view = ((*bvt).get_view)(buf);
-            std::slice::from_raw_parts(view.data, view.len as usize)
-        },
-    };
-    Document::from_reader(bytes).map_err(|e| format!("decode result_document: {e}"))
+fn empty_view() -> MongoExtensionByteView {
+    MongoExtensionByteView {
+        data: std::ptr::null(),
+        len: 0,
+    }
 }
+
+fn set_eof_empty(res: *mut MongoExtensionGetNextResult) {
+    unsafe {
+        (*res).code = MongoExtensionGetNextResultCode::kEOF;
+        (*res).result_document = MongoExtensionByteContainer {
+            type_: MongoExtensionByteContainerType::kByteView,
+            bytes: MongoExtensionByteContainerBytes { view: empty_view() },
+        };
+        (*res).result_metadata = MongoExtensionByteContainer {
+            type_: MongoExtensionByteContainerType::kByteView,
+            bytes: MongoExtensionByteContainerBytes { view: empty_view() },
+        };
+    }
+}
+
+/// `0` = not yet decided; `1` = passthrough upstream only; `2` = generator (`SourceStage`).
+const MODE_INIT: u8 = 0;
+const MODE_PASSTHROUGH: u8 = 1;
+const MODE_GENERATOR: u8 = 2;
 
 #[repr(C)]
 struct ExecObj {
     base: MongoExtensionExecAggStage,
     args: Vec<u8>,
     source: *mut MongoExtensionExecAggStage,
+    state: *mut c_void,
+    generator_done: Cell<bool>,
+    /// See [`MODE_INIT`] / [`MODE_PASSTHROUGH`] / [`MODE_GENERATOR`].
+    mode: Cell<u8>,
     saw_upstream_advanced: Cell<bool>,
-    emitted_eof_synthetic: Cell<bool>,
+    /// Host metrics object created in [`exec_create_metrics`](exec_create_metrics).
+    metrics: Cell<*mut MongoExtensionOperationMetrics>,
 }
 
 fn exec_alloc(args: Vec<u8>) -> ExecObj {
@@ -555,8 +583,11 @@ fn exec_alloc(args: Vec<u8>) -> ExecObj {
         },
         args,
         source: std::ptr::null_mut(),
+        state: std::ptr::null_mut(),
+        generator_done: Cell::new(false),
+        mode: Cell::new(MODE_INIT),
         saw_upstream_advanced: Cell::new(false),
-        emitted_eof_synthetic: Cell::new(false),
+        metrics: Cell::new(std::ptr::null_mut()),
     }
 }
 
@@ -564,7 +595,20 @@ unsafe extern "C" fn exec_destroy(p: *mut MongoExtensionExecAggStage) {
     if p.is_null() {
         return;
     }
-    drop(Box::from_raw(p.cast::<ExecObj>()));
+    let this = p.cast::<ExecObj>();
+    let ops = active_ops();
+    if !(*this).state.is_null() {
+        (ops.drop_state)((*this).state);
+    }
+    let m = (*this).metrics.get();
+    if !m.is_null() {
+        unsafe {
+            let vt = (*m).vtable;
+            ((*vt).destroy)(m);
+        }
+        (*this).metrics.set(std::ptr::null_mut());
+    }
+    drop(Box::from_raw(this));
 }
 
 unsafe extern "C" fn exec_get_next(
@@ -574,149 +618,138 @@ unsafe extern "C" fn exec_get_next(
 ) -> *mut MongoExtensionStatus {
     let this = p.cast::<ExecObj>();
     let src = (*this).source;
-    if src.is_null() {
-        (*res).code = MongoExtensionGetNextResultCode::kEOF;
-        let empty_view = MongoExtensionByteView {
-            data: std::ptr::null(),
-            len: 0,
-        };
-        (*res).result_document = MongoExtensionByteContainer {
-            type_: MongoExtensionByteContainerType::kByteView,
-            bytes: MongoExtensionByteContainerBytes { view: empty_view },
-        };
-        (*res).result_metadata = MongoExtensionByteContainer {
-            type_: MongoExtensionByteContainerType::kByteView,
-            bytes: MongoExtensionByteContainerBytes { view: empty_view },
-        };
+
+    // Passthrough: upstream produced at least one row — keep forwarding.
+    if (*this).mode.get() == MODE_PASSTHROUGH && !src.is_null() {
+        let vt = (*src).vtable;
+        let st = ((*vt).get_next)(src, ctx, res);
+        if !st.is_null() {
+            let svt = (*st).vtable;
+            let code = ((*svt).get_code)(st);
+            if code != crate::sys::MONGO_EXTENSION_STATUS_OK {
+                return st;
+            }
+            ((*svt).destroy)(st);
+        }
         return status::status_ok();
     }
-    let vt = (*src).vtable;
-    let st = ((*vt).get_next)(src, ctx, res);
-    if !st.is_null() {
-        let svt = (*st).vtable;
-        let code = ((*svt).get_code)(st);
-        if code != crate::sys::MONGO_EXTENSION_STATUS_OK {
-            return st;
+
+    if (*this).mode.get() == MODE_INIT && !src.is_null() {
+        let vt = (*src).vtable;
+        let st = ((*vt).get_next)(src, ctx, res);
+        if !st.is_null() {
+            let svt = (*st).vtable;
+            let code = ((*svt).get_code)(st);
+            if code != crate::sys::MONGO_EXTENSION_STATUS_OK {
+                return st;
+            }
+            ((*svt).destroy)(st);
         }
-        ((*svt).destroy)(st);
+        if (*res).code == MongoExtensionGetNextResultCode::kAdvanced {
+            (*this).saw_upstream_advanced.set(true);
+            (*this).mode.set(MODE_PASSTHROUGH);
+            return status::status_ok();
+        }
+        if (*res).code == MongoExtensionGetNextResultCode::kEOF && !(*this).saw_upstream_advanced.get() {
+            (*this).mode.set(MODE_GENERATOR);
+            // Fall through to generator using stage args (empty collection / no rows).
+        } else {
+            return status::status_ok();
+        }
     }
 
-    if (*res).code == MongoExtensionGetNextResultCode::kAdvanced {
-        (*this).saw_upstream_advanced.set(true);
-        let mapped = ffi_boundary(|| -> Result<(), String> {
-            let row = document_from_byte_container(&(*res).result_document)?;
-            let args_bytes: &[u8] = &(*this).args;
-            let args = Document::from_reader(args_bytes).map_err(|e| e.to_string())?;
-            let mg = map_globals();
-            let out = (mg.transform)(&row, &args)?;
-            let raw = byte_buf::from_bson(&out).map_err(|e| e.to_string())?;
-            (*res).result_document = MongoExtensionByteContainer {
-                type_: MongoExtensionByteContainerType::kByteBuf,
-                bytes: MongoExtensionByteContainerBytes { buf: raw },
-            };
-            Ok(())
-        });
-        return match mapped {
-            None => status::new_error_status(-1, "panic during map transform"),
-            Some(Err(e)) => status::new_error_status(-1, e),
-            Some(Ok(())) => status::status_ok(),
-        };
+    if (*this).mode.get() == MODE_INIT && src.is_null() {
+        (*this).mode.set(MODE_GENERATOR);
     }
 
-    if (*res).code == MongoExtensionGetNextResultCode::kEOF
-        && !(*this).saw_upstream_advanced.get()
-        && !(*this).emitted_eof_synthetic.get()
-    {
-        if let Some(on_eof) = map_globals().on_eof_no_rows {
-            let synth = ffi_boundary(|| -> Result<*mut crate::sys::MongoExtensionByteBuf, String> {
-                let args_bytes: &[u8] = &(*this).args;
-                let args = Document::from_reader(args_bytes).map_err(|e| e.to_string())?;
-                let out = on_eof(&args)?;
-                byte_buf::from_bson(&out).map_err(|e| e.to_string())
-            });
-            return match synth {
-                None => status::new_error_status(-1, "panic during on_eof_no_rows"),
-                Some(Err(e)) => status::new_error_status(-1, e),
-                Some(Ok(raw)) => {
-                    (*this).emitted_eof_synthetic.set(true);
+    if (*this).mode.get() != MODE_GENERATOR {
+        return status::status_ok();
+    }
+
+    if (*this).generator_done.get() {
+        set_eof_empty(res);
+        return status::status_ok();
+    }
+
+    let ops = active_ops();
+    let gen = ffi_boundary(|| -> crate::error::Result<()> {
+        let args_doc = Document::from_reader(std::io::Cursor::new(&(*this).args))
+            .map_err(|e| ExtensionError::FailedToParse(e.to_string()))?;
+        if (*this).state.is_null() {
+            let mut sctx = StageContext::new();
+            let st = (ops.open_from_doc)(args_doc, &mut sctx)?;
+            (*this).state = st;
+        }
+        let mut sctx = StageContext::new();
+        let metrics = (*this).metrics.get();
+        sctx.bind_execution(ctx, metrics);
+        let out = (ops.next)((*this).state, &mut sctx)?;
+        sctx.unbind_execution();
+        match out {
+            Next::Eof => {
+                (ops.drop_state)((*this).state);
+                (*this).state = std::ptr::null_mut();
+                (*this).generator_done.set(true);
+                unsafe {
+                    (*res).code = MongoExtensionGetNextResultCode::kEOF;
+                    (*res).result_document = MongoExtensionByteContainer {
+                        type_: MongoExtensionByteContainerType::kByteView,
+                        bytes: MongoExtensionByteContainerBytes { view: empty_view() },
+                    };
+                    (*res).result_metadata = MongoExtensionByteContainer {
+                        type_: MongoExtensionByteContainerType::kByteView,
+                        bytes: MongoExtensionByteContainerBytes { view: empty_view() },
+                    };
+                }
+            }
+            Next::Advanced { document, metadata } => {
+                let raw = byte_buf::from_bson(&document)
+                    .map_err(|e| ExtensionError::FailedToParse(e.to_string()))?;
+                let meta_container = match metadata {
+                    None => MongoExtensionByteContainer {
+                        type_: MongoExtensionByteContainerType::kByteView,
+                        bytes: MongoExtensionByteContainerBytes { view: empty_view() },
+                    },
+                    Some(meta_doc) => {
+                        let mbuf = byte_buf::from_bson(&meta_doc)
+                            .map_err(|e| ExtensionError::FailedToParse(e.to_string()))?;
+                        MongoExtensionByteContainer {
+                            type_: MongoExtensionByteContainerType::kByteBuf,
+                            bytes: MongoExtensionByteContainerBytes { buf: mbuf },
+                        }
+                    }
+                };
+                unsafe {
                     (*res).code = MongoExtensionGetNextResultCode::kAdvanced;
                     (*res).result_document = MongoExtensionByteContainer {
                         type_: MongoExtensionByteContainerType::kByteBuf,
                         bytes: MongoExtensionByteContainerBytes { buf: raw },
                     };
-                    let empty_view = MongoExtensionByteView {
-                        data: std::ptr::null(),
-                        len: 0,
-                    };
-                    (*res).result_metadata = MongoExtensionByteContainer {
-                        type_: MongoExtensionByteContainerType::kByteView,
-                        bytes: MongoExtensionByteContainerBytes { view: empty_view },
-                    };
-                    status::status_ok()
+                    (*res).result_metadata = meta_container;
                 }
-            };
+            }
         }
+        Ok(())
+    });
+    match gen {
+        None => ExtensionError::Runtime("panic during source stage get_next".into()).into_raw_status(),
+        Some(Err(e)) => e.into_raw_status(),
+        Some(Ok(())) => status::status_ok(),
     }
-
-    status::status_ok()
 }
 
 unsafe extern "C" fn exec_get_name(_: *const MongoExtensionExecAggStage) -> MongoExtensionByteView {
     name_view()
 }
 
-#[repr(C)]
-struct EmptyMetrics {
-    base: MongoExtensionOperationMetrics,
-}
-
-unsafe extern "C" fn met_destroy(p: *mut MongoExtensionOperationMetrics) {
-    if p.is_null() {
-        return;
-    }
-    drop(Box::from_raw(p.cast::<EmptyMetrics>()));
-}
-
-unsafe extern "C" fn met_serialize(
-    _: *const MongoExtensionOperationMetrics,
-    out: *mut *mut crate::sys::MongoExtensionByteBuf,
-) -> *mut MongoExtensionStatus {
-    let empty = bson::Document::new();
-    match byte_buf::from_bson(&empty) {
-        Ok(b) => {
-            *out = b;
-            status::status_ok()
-        }
-        Err(e) => {
-            *out = std::ptr::null_mut();
-            status::new_error_status(-1, e.to_string())
-        }
-    }
-}
-
-unsafe extern "C" fn met_update(
-    _: *mut MongoExtensionOperationMetrics,
-    _: MongoExtensionByteView,
-) -> *mut MongoExtensionStatus {
-    status::status_ok()
-}
-
-static METRICS_VTABLE: MongoExtensionOperationMetricsVTable = MongoExtensionOperationMetricsVTable {
-    destroy: met_destroy,
-    serialize: met_serialize,
-    update: met_update,
-};
-
 unsafe extern "C" fn exec_create_metrics(
-    _: *const MongoExtensionExecAggStage,
+    exec: *const MongoExtensionExecAggStage,
     out: *mut *mut MongoExtensionOperationMetrics,
 ) -> *mut MongoExtensionStatus {
-    let m = Box::new(EmptyMetrics {
-        base: MongoExtensionOperationMetrics {
-            vtable: &METRICS_VTABLE,
-        },
-    });
-    *out = Box::into_raw(m).cast::<MongoExtensionOperationMetrics>();
+    let this = exec.cast::<ExecObj>();
+    let m = crate::operation_metrics::alloc_sdk_operation_metrics();
+    (*this).metrics.set(m);
+    *out = m;
     status::status_ok()
 }
 
@@ -754,7 +787,7 @@ unsafe extern "C" fn exec_explain(
         }
         Err(e) => {
             *out = std::ptr::null_mut();
-            status::new_error_status(-1, e.to_string())
+            ExtensionError::FailedToParse(e.to_string()).into_raw_status()
         }
     }
 }
@@ -786,37 +819,42 @@ unsafe extern "C" fn ext_init(
     portal: *const crate::sys::MongoExtensionHostPortal,
     services: *const crate::sys::MongoExtensionHostServices,
 ) -> *mut MongoExtensionStatus {
-    let r = ffi_boundary(|| -> Result<(), String> {
+    let r = ffi_boundary(|| -> crate::error::Result<()> {
         host::set_host_services(services);
         unsafe {
             host::cache_extension_options_from_portal(portal);
         }
-        let mg = map_globals();
-        if let Some(init) = mg.on_extension_initialized {
+        let ops = active_ops();
+        if let Some(init) = ops.on_extension_initialized {
             unsafe { init(portal)? };
         }
         let ext = EXTENSION_OBJ_ADDR
             .get()
             .copied()
-            .ok_or_else(|| "extension object not installed".to_string())? as *const ExtensionObj;
+            .ok_or_else(|| ExtensionError::Runtime("extension object not installed".into()))?
+            as *const ExtensionObj;
         let st = host::register_stage_descriptor(
             portal,
             std::ptr::addr_of!((*ext).descriptor.base),
         );
         if st.is_null() {
-            return Err("null status from register_stage_descriptor".into());
+            return Err(ExtensionError::Runtime(
+                "null status from register_stage_descriptor".into(),
+            ));
         }
         let vt = (*st).vtable;
         let code = ((*vt).get_code)(st);
         ((*vt).destroy)(st);
         if code != crate::sys::MONGO_EXTENSION_STATUS_OK {
-            return Err("register_stage_descriptor failed".into());
+            return Err(ExtensionError::Runtime(
+                "register_stage_descriptor failed".into(),
+            ));
         }
         Ok(())
     });
     match r {
-        None => status::new_error_status(-1, "panic during extension initialize"),
-        Some(Err(e)) => status::new_error_status(-1, e),
+        None => ExtensionError::Runtime("panic during extension initialize".into()).into_raw_status(),
+        Some(Err(e)) => e.into_raw_status(),
         Some(Ok(())) => status::status_ok(),
     }
 }
@@ -825,20 +863,20 @@ static EXTENSION_VTABLE: MongoExtensionVTable = MongoExtensionVTable {
     initialize: ext_init,
 };
 
-/// Shared implementation for the `export_map_transform_stage!` macro.
-pub unsafe fn get_map_extension_impl(
-    globals: MapStageGlobals,
+/// Called from `export_source_stage!` with a static [`SourceOps`] table for the concrete stage.
+pub unsafe fn get_source_extension_impl(
+    ops: &'static SourceOps,
     host_versions: *const crate::sys::MongoExtensionAPIVersionVector,
     extension_out: *mut *const MongoExtension,
 ) -> *mut MongoExtensionStatus {
     if host_versions.is_null() || extension_out.is_null() {
         return status::new_error_status(-1, "null parameter to get_mongodb_extension");
     }
-    let hv = &*host_versions;
+    let hv = unsafe { &*host_versions };
     if !host_supports_extension(hv, EXTENSION_API_VERSION) {
         return status::new_error_status(-1, "incompatible extension API version");
     }
-    let _ = MAP_ACTIVE_STAGE.get_or_init(|| globals);
+    let _ = ACTIVE_OPS.get_or_init(|| ops);
     let addr = *EXTENSION_OBJ_ADDR.get_or_init(|| {
         let p = Box::into_raw(Box::new(ExtensionObj {
             base: MongoExtension {
@@ -854,6 +892,8 @@ pub unsafe fn get_map_extension_impl(
         p as usize
     });
     let obj = addr as *const ExtensionObj;
-    *extension_out = std::ptr::addr_of!((*obj).base);
+    unsafe {
+        *extension_out = std::ptr::addr_of!((*obj).base);
+    }
     status::status_ok()
 }

@@ -12,6 +12,6 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "SSPL-1.0"
-repository = "https://github.com/mongodb/mongo"
-description = "Rust SDK for MongoDB server extensions (aggregation stages)"
+license = "MIT"
+repository = "https://github.com/olexandr-havryliak/rust-sdk-mongodb-extension"
+description = "Rust SDK for MongoDB Extensions (workspace: SDK crates, examples, tests)"
