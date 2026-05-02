@@ -30,15 +30,20 @@ pub struct JsonlExtensionConfig {
 
 #[derive(Debug, Deserialize)]
 struct ExtensionOptionsJson {
+    /// Many `mongod` builds only forward a subset of keys in the extension manifest to
+    /// `get_extension_options`; when absent, the demo image uses [`DEMO_ALLOWED_ROOT`].
+    #[serde(default)]
     #[serde(rename = "allowedRoot")]
-    allowed_root: String,
+    allowed_root: Option<String>,
     #[serde(default)]
     #[serde(rename = "allowSymlinks")]
     allow_symlinks: bool,
+    #[serde(default)]
     #[serde(rename = "maxLineBytes")]
-    max_line_bytes: u64,
+    max_line_bytes: Option<u64>,
+    #[serde(default)]
     #[serde(rename = "maxDocumentBytes")]
-    max_document_bytes: u64,
+    max_document_bytes: Option<u64>,
 }
 
 /// Parse extension options from raw bytes (JSON object or simple `key: value` lines).
@@ -50,11 +55,17 @@ pub fn parse_extension_options(raw: &[u8]) -> ExtensionResult<JsonlExtensionConf
         let j: ExtensionOptionsJson = serde_json::from_str(t).map_err(|e| {
             ExtensionError::Runtime(format!("extension options JSON: {e}"))
         })?;
+        let root = j
+            .allowed_root
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEMO_ALLOWED_ROOT);
         return Ok(JsonlExtensionConfig {
-            allowed_root: PathBuf::from(j.allowed_root.trim()),
+            allowed_root: PathBuf::from(root),
             allow_symlinks: j.allow_symlinks,
-            max_line_bytes: j.max_line_bytes.max(1),
-            max_document_bytes: j.max_document_bytes.max(1),
+            max_line_bytes: j.max_line_bytes.unwrap_or(1_048_576).max(1),
+            max_document_bytes: j.max_document_bytes.unwrap_or(16_777_216).max(1),
         });
     }
     parse_extension_options_yaml_lines(t)
@@ -80,9 +91,11 @@ fn parse_extension_options_yaml_lines(text: &str) -> ExtensionResult<JsonlExtens
             max_document_bytes = v.trim().parse().ok();
         }
     }
-    let allowed_root = allowed_root.ok_or_else(|| {
-        ExtensionError::Runtime("extension options: missing allowedRoot".into())
-    })?;
+    // Official images often omit unknown manifest keys from the options blob; keep a
+    // Docker-friendly default so `examples/data-federation` and e2e fixtures still work.
+    let allowed_root = allowed_root
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEMO_ALLOWED_ROOT.to_string());
     Ok(JsonlExtensionConfig {
         allowed_root: PathBuf::from(allowed_root),
         allow_symlinks,
@@ -91,17 +104,21 @@ fn parse_extension_options_yaml_lines(text: &str) -> ExtensionResult<JsonlExtens
     })
 }
 
+fn demo_extension_config_fallback() -> JsonlExtensionConfig {
+    JsonlExtensionConfig {
+        allowed_root: PathBuf::from(DEMO_ALLOWED_ROOT),
+        allow_symlinks: false,
+        max_line_bytes: 1_048_576,
+        max_document_bytes: 16_777_216,
+    }
+}
+
 fn extension_config_from_context(ctx: &mut StageContext) -> ExtensionResult<JsonlExtensionConfig> {
-    let raw = ctx.extension_options_raw().ok_or_else(|| {
-        ExtensionError::Runtime(
-            "extension options not available (host did not provide options snapshot)".into(),
-        )
-    })?;
+    let Some(raw) = ctx.extension_options_raw() else {
+        return Ok(demo_extension_config_fallback());
+    };
     if raw.is_empty() {
-        return Err(ExtensionError::Runtime(
-            "extension options are empty; configure allowedRoot, allowSymlinks, maxLineBytes, maxDocumentBytes"
-                .into(),
-        ));
+        return Ok(demo_extension_config_fallback());
     }
     parse_extension_options(&raw)
 }
@@ -442,6 +459,142 @@ mod tests {
         assert_eq!(a.max_documents, Some(5));
     }
 
+    /// Stage document parameters: `path` and optional `maxDocuments` (BSON field names).
+    mod stage_extension_parameters {
+        use super::*;
+
+        #[test]
+        fn path_only_max_documents_none() {
+            let a = ReadLocalJsonl::parse(doc! { "path": "events.jsonl" }).expect("parse");
+            assert_eq!(a.path, "events.jsonl");
+            assert_eq!(a.max_documents, None);
+        }
+
+        #[test]
+        fn path_trimmed() {
+            let a = ReadLocalJsonl::parse(doc! { "path": "  sub/file.jsonl  " }).expect("parse");
+            assert_eq!(a.path, "sub/file.jsonl");
+        }
+
+        #[test]
+        fn max_documents_int32() {
+            let a = ReadLocalJsonl::parse(doc! { "path": "x.jsonl", "maxDocuments": 99i32 }).expect("parse");
+            assert_eq!(a.max_documents, Some(99));
+        }
+
+        #[test]
+        fn max_documents_negative_rejected() {
+            let e = ReadLocalJsonl::parse(doc! { "path": "x.jsonl", "maxDocuments": -1i64 }).unwrap_err();
+            assert!(matches!(e, ExtensionError::FailedToParse(_)));
+        }
+
+        #[test]
+        fn max_documents_zero_allowed() {
+            let a = ReadLocalJsonl::parse(doc! { "path": "x.jsonl", "maxDocuments": 0i64 }).expect("parse");
+            assert_eq!(a.max_documents, Some(0));
+        }
+
+        #[test]
+        fn path_wrong_type_fails() {
+            let e = ReadLocalJsonl::parse(doc! { "path": 1i32 }).unwrap_err();
+            assert!(matches!(e, ExtensionError::FailedToParse(_)));
+        }
+
+        #[test]
+        fn empty_path_after_trim_fails() {
+            let e = ReadLocalJsonl::parse(doc! { "path": "   " }).unwrap_err();
+            assert!(matches!(e, ExtensionError::FailedToParse(_)));
+        }
+
+        #[test]
+        fn extra_unknown_keys_ignored() {
+            let a = ReadLocalJsonl::parse(doc! {
+                "path": "a.jsonl",
+                "maxDocuments": 3i64,
+                "probe": "ignored",
+            })
+            .expect("parse");
+            assert_eq!(a.path, "a.jsonl");
+            assert_eq!(a.max_documents, Some(3));
+        }
+    }
+
+    /// Extension manifest / options blob (`allowedRoot`, `allowSymlinks`, `maxLineBytes`, `maxDocumentBytes`).
+    mod extension_options_parameters {
+        use super::*;
+
+        #[test]
+        fn json_partial_fields_use_defaults_for_limits() {
+            let j = r#"{"allowedRoot":"/opt/data"}"#;
+            let c = parse_extension_options(j.as_bytes()).expect("parse");
+            assert_eq!(c.allowed_root, PathBuf::from("/opt/data"));
+            assert!(!c.allow_symlinks);
+            assert_eq!(c.max_line_bytes, 1_048_576);
+            assert_eq!(c.max_document_bytes, 16_777_216);
+        }
+
+        #[test]
+        fn json_allow_symlinks_true() {
+            let j = r#"{"allowedRoot":"/tmp","allowSymlinks":true}"#;
+            let c = parse_extension_options(j.as_bytes()).expect("parse");
+            assert!(c.allow_symlinks);
+        }
+
+        #[test]
+        fn json_max_line_and_doc_bytes_zero_clamp_to_one() {
+            let j = r#"{"allowedRoot":"/tmp","maxLineBytes":0,"maxDocumentBytes":0}"#;
+            let c = parse_extension_options(j.as_bytes()).expect("parse");
+            assert_eq!(c.max_line_bytes, 1);
+            assert_eq!(c.max_document_bytes, 1);
+        }
+
+        #[test]
+        fn json_whitespace_trimmed_allowed_root() {
+            let j = r#"{"allowedRoot":"  /tmp/x  "}"#;
+            let c = parse_extension_options(j.as_bytes()).expect("parse");
+            assert_eq!(c.allowed_root, PathBuf::from("/tmp/x"));
+        }
+
+        #[test]
+        fn json_invalid_syntax_runtime_error() {
+            let e = parse_extension_options(br"{ not json").unwrap_err();
+            assert!(matches!(e, ExtensionError::Runtime(_)));
+        }
+
+        #[test]
+        fn yaml_allow_symlinks_yes_and_one() {
+            for y in [
+                "allowedRoot: /a\nallowSymlinks: yes\n",
+                "allowedRoot: /a\nallowSymlinks: 1\n",
+            ] {
+                let c = parse_extension_options(y.as_bytes()).expect("parse");
+                assert!(c.allow_symlinks, "{y}");
+            }
+        }
+
+        #[test]
+        fn yaml_commented_and_unknown_lines() {
+            let y = "# comment\nsharedLibraryPath: /lib.so\nallowedRoot: /mnt/ro\n# another\nmaxLineBytes: 2048\n";
+            let c = parse_extension_options(y.as_bytes()).expect("parse");
+            assert_eq!(c.allowed_root, PathBuf::from("/mnt/ro"));
+            assert_eq!(c.max_line_bytes, 2048);
+        }
+
+        #[test]
+        fn yaml_quoted_allowed_root() {
+            let y = "allowedRoot: \"/var/lib/x\"\n";
+            let c = parse_extension_options(y.as_bytes()).expect("parse");
+            assert_eq!(c.allowed_root, PathBuf::from("/var/lib/x"));
+        }
+
+        #[test]
+        fn extension_options_invalid_utf8() {
+            let raw: &[u8] = &[0xff, 0xfe, 0xfd];
+            let e = parse_extension_options(raw).unwrap_err();
+            assert!(matches!(e, ExtensionError::Runtime(s) if s.contains("UTF-8")));
+        }
+    }
+
     #[test]
     fn resolve_accepts_nested_file() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -496,6 +649,22 @@ mod tests {
         assert!(c.allow_symlinks);
         assert_eq!(c.max_line_bytes, 512);
         assert_eq!(c.max_document_bytes, 1024);
+    }
+
+    #[test]
+    fn parse_extension_options_yaml_only_shared_library_path_defaults_allowed_root() {
+        let y = "sharedLibraryPath: /usr/local/lib/mongo-extensions/libdata_federation_extension.so\n";
+        let c = parse_extension_options(y.as_bytes()).expect("parse");
+        assert_eq!(c.allowed_root, PathBuf::from(DEMO_ALLOWED_ROOT));
+        assert!(!c.allow_symlinks);
+    }
+
+    #[test]
+    fn parse_extension_options_json_empty_object_uses_demo_defaults() {
+        let c = parse_extension_options(b"{}\n").expect("parse");
+        assert_eq!(c.allowed_root, PathBuf::from(DEMO_ALLOWED_ROOT));
+        assert_eq!(c.max_line_bytes, 1_048_576);
+        assert_eq!(c.max_document_bytes, 16_777_216);
     }
 
     #[test]

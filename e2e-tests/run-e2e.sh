@@ -82,7 +82,7 @@ if ! grep -qE '^SOURCE_STAGE_NO_UPSTREAM_(OK|SKIPPED)' <<<"$fib"; then
   exit 1
 fi
 
-echo "==> Running \$readLocalJsonl (data federation fixtures on /federation-data)..."
+echo "==> Running \$readLocalJsonl e2e (fixtures on /federation-data; varied path / maxDocuments)..."
 set +e
 fed="$("${COMPOSE[@]}" exec -T mongo mongosh --quiet /scripts/data_federation_e2e.js 2>&1)"
 fedrc=$?

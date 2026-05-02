@@ -25,30 +25,16 @@ if (rows[0]._fed !== "orders" || num(rows[0].id) !== 1 || rows[0].sku !== "alpha
   quit(2);
 }
 
-let agg1Ok = false;
-let agg1 = null;
-try {
-  agg1 = d.runCommand({
-    aggregate: 1,
-    pipeline: [
-      { $readLocalJsonl: { path: "events.jsonl", maxDocuments: 1000 } },
-      { $match: { level: "error" } },
-      { $limit: 10 },
-    ],
-    cursor: {},
-  });
-  agg1Ok = !!(agg1 && agg1.ok === 1 && agg1.cursor && Array.isArray(agg1.cursor.firstBatch));
-} catch (_e) {
-  agg1Ok = false;
-}
-if (agg1Ok) {
-  const errs = agg1.cursor.firstBatch;
-  if (errs.length !== 2 || errs[0].level !== "error" || errs[1].level !== "error") {
-    print("AGG1_MATCH_BAD", JSON.stringify(errs));
-    quit(3);
-  }
-} else {
-  print("AGG1_SKIPPED", agg1 && (agg1.errmsg || agg1.codeName) ? String(agg1.errmsg || agg1.codeName) : "aggregate:1 not supported");
+const errs = d.n
+  .aggregate([
+    { $readLocalJsonl: { path: "events.jsonl", maxDocuments: 1000 } },
+    { $match: { level: "error" } },
+    { $limit: 10 },
+  ])
+  .toArray();
+if (errs.length !== 2 || errs[0].level !== "error" || errs[1].level !== "error") {
+  print("EVENTS_MATCH_BAD", JSON.stringify(errs));
+  quit(3);
 }
 
 print("DEMO_OK");

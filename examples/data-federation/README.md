@@ -37,7 +37,7 @@ Example options (JSON):
 }
 ```
 
-The Docker images in this repo use **`allowedRoot: /federation-data`** with Compose bind-mounting **`examples/data-federation/fixtures`** there.
+The Docker images in this repo set **`allowedRoot: /federation-data`** in the extension `*.conf` and bind-mount **`examples/data-federation/fixtures`** there. If your **`mongod`** build does not forward custom keys from the manifest into the extension-options blob (only **`sharedLibraryPath`**, etc.), the stage still defaults **`allowedRoot`** to **`/federation-data`** so the demo and e2e stacks keep working—**set `allowedRoot` explicitly in production** when your server supports it.
 
 ## Behaviour
 
@@ -102,23 +102,16 @@ db.n.aggregate([
 ]);
 ```
 
-**`aggregate: 1`** (literal collection; supported on some server builds):
+**Same pattern for `events.jsonl`** (empty collection **`n`**; on MongoDB **8.3-rc**, **`{ aggregate: 1, … }`** without a collection is rejected for this stage — use **`db.<coll>.aggregate`** instead):
 
 ```javascript
-db.runCommand({
-  aggregate: 1,
-  pipeline: [
-    {
-      $readLocalJsonl: {
-        path: "events.jsonl",
-        maxDocuments: 1000,
-      },
-    },
-    { $match: { level: "error" } },
-    { $limit: 10 },
-  ],
-  cursor: {},
-});
+use data_federation_demo;
+db.createCollection("n");
+db.n.aggregate([
+  { $readLocalJsonl: { path: "events.jsonl", maxDocuments: 1000 } },
+  { $match: { level: "error" } },
+  { $limit: 10 },
+]).toArray();
 ```
 
 Edit files under **`examples/data-federation/fixtures/`** on the host; the container sees them under **`/federation-data`**.
@@ -132,7 +125,7 @@ Edit files under **`examples/data-federation/fixtures/`** on the host; the conta
 
 ## Tests
 
-- **Unit tests:** `cargo test -p data_federation_extension` (path rules, JSONL parsing, limits, extension options parsing).
-- **E2E:** `./e2e-tests/run-e2e.sh` runs [`../e2e-tests/scripts/data_federation_e2e.js`](../e2e-tests/scripts/data_federation_e2e.js) against the shared stack.
+- **Unit tests:** `cargo test -p data_federation_extension` — includes **`stage_extension_parameters`** (BSON **`path`** / **`maxDocuments`**) and **`extension_options_parameters`** (JSON and YAML **`allowedRoot`**, **`allowSymlinks`**, **`maxLineBytes`**, **`maxDocumentBytes`**, defaults, invalid UTF-8), plus path rules, JSONL parsing, and line limits.
+- **E2E:** `./e2e-tests/run-e2e.sh` runs [`../e2e-tests/scripts/data_federation_e2e.js`](../e2e-tests/scripts/data_federation_e2e.js) against the shared stack (varied **`path`** / **`maxDocuments`** and downstream **`$match`**).
 
 Implementation: [`data-federation-extension/`](data-federation-extension/) (`cdylib`).
