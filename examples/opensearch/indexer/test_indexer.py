@@ -100,12 +100,34 @@ class WriteTests(unittest.TestCase):
     def write(self, message=None):
         return indexer.write_record(self.client, CONFIG, STREAM, message or record())
 
+    def test_type_distinct_ids_get_distinct_opensearch_keys(self):
+        oid = {"$oid": "507f1f77bcf86cd799439011"}
+        hex_id = "507f1f77bcf86cd799439011"
+        cases = [
+            ({"_id": 1, "name": "n"}, {"_id": 1}, "1"),
+            ({"_id": "1", "name": "n"}, {"_id": "1"}, '"1"'),
+            ({"_id": oid}, {"_id": oid}, '{"$oid":"507f1f77bcf86cd799439011"}'),
+            ({"_id": hex_id}, {"_id": hex_id}, f'"{hex_id}"'),
+        ]
+        keys = []
+        for value, key, expected in cases:
+            self.client.reset_mock()
+            self.write(record(
+                value=json.dumps(value).encode(),
+                key=json.dumps(key).encode(),
+            ))
+            opensearch_id = self.client.index.call_args.kwargs["id"]
+            self.assertEqual(opensearch_id, expected)
+            self.assertEqual(self.client.index.call_args.kwargs["body"]["_mongo_id"], expected)
+            keys.append(opensearch_id)
+        self.assertEqual(len(set(keys)), len(cases))
+
     def test_full_replace_uses_external_offset_version(self):
         self.write(record(offset=8))
         args = self.client.index.call_args.kwargs
         self.assertEqual(args["version"], 9)
         self.assertEqual(args["version_type"], "external")
-        self.assertEqual(args["id"], "p1")
+        self.assertEqual(args["id"], '"p1"')
         self.assertNotIn("_id", args["body"])
         self.assertEqual(args["body"]["_mongo_id"], '"p1"')
         self.assertFalse(args["body"]["_sync_deleted"])
@@ -114,6 +136,7 @@ class WriteTests(unittest.TestCase):
     def test_delete_is_persistent_tombstone_without_embedding(self):
         self.write(record(offset=9, value=None))
         args = self.client.index.call_args.kwargs
+        self.assertEqual(args["id"], '"p1"')
         self.assertTrue(args["body"]["_sync_deleted"])
         self.assertEqual(args["pipeline"], "_none")
         self.assertNotIn("name", args["body"])
@@ -178,12 +201,12 @@ class WriteTests(unittest.TestCase):
                 random.Random(seed).shuffle(replay)
                 for message in replay:
                     indexer.write_record(store, CONFIG, STREAM, message)
-                self.assertEqual(store.get(index=TOPIC, id="p1")["_version"], 50)
-                self.assertTrue(store.get(index=TOPIC, id="p1")["_source"]["_sync_deleted"])
+                self.assertEqual(store.get(index=TOPIC, id='"p1"')["_version"], 50)
+                self.assertTrue(store.get(index=TOPIC, id='"p1"')["_source"]["_sync_deleted"])
                 indexer.write_record(store, CONFIG, STREAM, record(offset=50))
                 for message in messages:
                     indexer.write_record(store, CONFIG, STREAM, message)
-                self.assertFalse(store.get(index=TOPIC, id="p1")["_source"]["_sync_deleted"])
+                self.assertFalse(store.get(index=TOPIC, id='"p1"')["_source"]["_sync_deleted"])
 
 
 class ProjectionTests(unittest.TestCase):

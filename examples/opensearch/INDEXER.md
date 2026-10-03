@@ -24,7 +24,8 @@ For each record, the active worker:
 1. Verifies that it owns the partition and that the topic UUID is unchanged.
 2. Parses the complete document and validates that its key matches `_id`.
 3. Projects configured fields, stores the original `_id` JSON in `_mongo_id`, and
-   writes the string form as the OpenSearch document ID. Updates replace the
+   uses that same JSON as the OpenSearch document ID. Integer `1` and string
+   `"1"` stay different keys. Updates replace the
    entire indexed document, including newly generated embeddings.
 4. Sends `version=offset+1` and `version_type=external`. Offset zero becomes
    positive version one. OpenSearch rejects equal or older versions.

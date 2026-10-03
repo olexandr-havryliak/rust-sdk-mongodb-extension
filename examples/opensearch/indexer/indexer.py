@@ -249,20 +249,38 @@ def decode_json(raw):
     return json.loads(raw)
 
 
-def document_id_from_key(key):
+def raw_id_from_key(key):
     decoded = decode_json(key)
     if not isinstance(decoded, dict):
         return None
     if "documentKey" in decoded:
         decoded = decoded["documentKey"]
-    if not isinstance(decoded, dict):
+    if not isinstance(decoded, dict) or "_id" not in decoded:
         return None
-    return extract_id(decoded.get("_id"))
+    return decoded.get("_id")
+
+
+def document_id_from_key(key):
+    raw = raw_id_from_key(key)
+    if raw is None:
+        return None
+    return extract_id(raw)
 
 
 def preserved_mongo_id(raw):
     """JSON text of the original `_id`, stored so search can rebuild its BSON type."""
     return json.dumps(raw, separators=(",", ":"), sort_keys=True)
+
+
+def opensearch_document_id(raw):
+    """Canonical `_id` JSON. Integer `1` and string `"1"` stay different keys."""
+    if isinstance(raw, bool) or raw is None or (isinstance(raw, str) and raw == ""):
+        raise ValueError("record has no supported document ID")
+    if isinstance(raw, (str, int)):
+        return preserved_mongo_id(raw)
+    if isinstance(raw, dict) and len(raw) == 1 and next(iter(raw)) in ("$oid", "$uuid"):
+        return preserved_mongo_id(raw)
+    raise ValueError("record has no supported document ID")
 
 
 def project_document(namespace, namespace_config, document):
@@ -304,31 +322,33 @@ def describe_stream(admin, topic):
 def write_record(client, namespace_config, stream, message):
     if message.topic != stream["topic"] or message.partition != 0 or message.offset < 0:
         raise RuntimeError("record belongs to an unexpected partition")
-    key_id = document_id_from_key(message.key)
+    key_raw = raw_id_from_key(message.key)
     deleted = message.value is None
     if deleted:
-        document_id = key_id
+        document_raw = key_raw
         body = {"_mongo_namespace": message.topic}
     else:
-        body = project_document(message.topic, namespace_config, decode_json(message.value))
-        document_id = body.pop("_id")
-        if key_id is None or str(key_id) != str(document_id):
+        decoded = decode_json(message.value)
+        document_raw = decoded.get("_id") if isinstance(decoded, dict) else None
+        body = project_document(message.topic, namespace_config, decoded)
+        body.pop("_id")
+        key_encoded = None if key_raw is None else opensearch_document_id(key_raw)
+        if key_encoded != opensearch_document_id(document_raw):
             raise ValueError("record key must match document _id")
-    if not isinstance(document_id, (str, int)) or isinstance(document_id, bool) or str(document_id) == "":
-        raise ValueError("record has no supported document ID")
+    document_key = opensearch_document_id(document_raw)
     body.update({"_sync_deleted": deleted, "_sync_topic_id": stream["topic_id"]})
     version = message.offset + 1
     options = {"pipeline": "_none"} if deleted else {}
     try:
-        client.index(index=namespace_config["index"], id=str(document_id), body=body,
+        client.index(index=namespace_config["index"], id=document_key, body=body,
                      version=version, version_type="external", refresh=True, **options)
     except ConflictError:
-        stored = client.get(index=namespace_config["index"], id=str(document_id))
+        stored = client.get(index=namespace_config["index"], id=document_key)
         if (stored.get("_version", 0) < version or
                 stored.get("_source", {}).get("_sync_topic_id") != stream["topic_id"]):
             raise RuntimeError("version conflict with an unrecognized stream")
         # A duplicate or late request cannot overwrite the newer indexed state.
-    log(f"{'tombstoned' if deleted else 'indexed'} {message.topic}/{document_id} offset={message.offset}")
+    log(f"{'tombstoned' if deleted else 'indexed'} {message.topic}/{document_key} offset={message.offset}")
 
 
 def process_record(consumer, client, namespace_config, stream, message):

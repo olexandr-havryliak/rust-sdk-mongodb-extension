@@ -16,7 +16,7 @@ consumer behavior and the current HA/FT limitations.
   `$vectorSearch`.
 - Keep MongoDB free of search/vector index definitions; search indexes live in
   OpenSearch.
-- Preserve MongoDB `_id` as the OpenSearch document `_id`.
+- Preserve each MongoDB `_id` as canonical JSON in the OpenSearch document `_id`, so distinct BSON types stay distinct keys.
 - Derive the OpenSearch index name from the MongoDB namespace.
 - Return full MongoDB documents by combining OpenSearch candidate results with
   MongoDB host ID lookup.
@@ -59,7 +59,7 @@ The connector publishes full MongoDB documents to Kafka. The indexing service:
 3. creates ingest and search pipelines for autoembeddings when a model ID is
    available;
 4. projects only configured fields into OpenSearch;
-5. writes OpenSearch documents using MongoDB `_id` as OpenSearch `_id`;
+5. writes OpenSearch documents using the canonical JSON of MongoDB `_id` as OpenSearch `_id`;
 6. handles inserts, replacements, updates, and deletes.
 
 `publish.full.document.only=true` makes update events carry a full document, so

@@ -79,9 +79,11 @@ After model setup, [indexer/indexer.py](indexer/indexer.py) reads
 The `search` tag creates a text field. The `vectorSearch` tag also creates
 `<field>_embedding`. `filter` and `sort` fields use their configured scalar types.
 Only configured fields are sent to OpenSearch, plus namespace and sync metadata.
-MongoDB `_id` becomes the OpenSearch document ID. `_mongo_id` keeps that `_id`
-as JSON so `$search` and `$vectorSearch` can emit the original BSON type to
-`$_internalSearchIdLookup`. The connector's simplified JSON does not distinguish
+The OpenSearch document ID is the canonical JSON of the original MongoDB `_id`,
+and `_mongo_id` stores that same JSON so `$search` and `$vectorSearch` can emit
+the original BSON type to `$_internalSearchIdLookup`. Distinct BSON types stay
+distinct keys: integer `1`, string `"1"`, and an ObjectId do not overwrite one
+another. The connector's simplified JSON does not distinguish
 int32 from int64: a bare JSON integer that fits in int32 is restored as int32,
 while `$numberInt`, `$numberLong`, and `$oid` keep the type they declare.
 

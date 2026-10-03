@@ -32,7 +32,7 @@ if [[ -z "${ok:-}" ]]; then
   exit 1
 fi
 
-echo "==> Running mongo_extension_fuzz (ITERATIONS=${ITERATIONS}, stages=\$search|\$vectorSearch)..."
+echo "==> Running mongo_extension_fuzz (ITERATIONS=${ITERATIONS}, stages=\$search|\$vectorSearch|\$fibonacci|\$readLocalJsonl|\$rustSdkE2e)..."
 "${COMPOSE[@]}" --profile fuzz run --rm fuzz
 
 echo "==> Mongo aggregation fuzz finished (mongod still running; use: docker compose -f e2e-tests/docker-compose.yml --project-name rust-sdk-mongo-e2e down)."

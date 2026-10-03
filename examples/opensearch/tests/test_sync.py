@@ -1,5 +1,7 @@
+import json
 import sys
 import time
+from urllib.parse import quote
 
 import requests
 from pymongo import MongoClient
@@ -36,8 +38,13 @@ def os_post(path, body):
     return response.json()
 
 
+def opensearch_id(mongo_id):
+    return json.dumps(mongo_id, separators=(",", ":"), sort_keys=True)
+
+
 def os_doc(document_id):
-    response = requests.get(f"{OPENSEARCH_URL}/{INDEX}/_doc/{document_id}", timeout=10)
+    encoded = quote(document_id, safe="")
+    response = requests.get(f"{OPENSEARCH_URL}/{INDEX}/_doc/{encoded}", timeout=10)
     if response.status_code == 404:
         return None
     response.raise_for_status()
@@ -73,7 +80,7 @@ def main():
     assert mapping["updatedAt"]["type"] == "date"
 
     assert_doc(
-        "p001",
+        opensearch_id("p001"),
         lambda source: source["name"] == "Alpine Trail Pack 32L"
         and len(source.get("description_embedding", [])) == 384,
         "copy_existing p001 with embedding",
@@ -98,7 +105,7 @@ def main():
             )["hits"]["hits"]
         ),
     )
-    assert_doc("p007", lambda source: source["category"] == "camp-kitchen", "copy_existing p007")
+    assert_doc(opensearch_id("p007"), lambda source: source["category"] == "camp-kitchen", "copy_existing p007")
 
     mongo = MongoClient(MONGO_URI)
     products = mongo.search_demo.products
@@ -109,7 +116,7 @@ def main():
             def matches():
                 hits = list(products.aggregate([{stage: {
                     "path": "description", "query": query, "limit": 1,
-                    "filter": {"ids": {"values": [document_id]}},
+                    "filter": {"ids": {"values": [opensearch_id(document_id)]}},
                 }}]))
                 return hits == [expected]
 
@@ -117,7 +124,7 @@ def main():
             scores = list(products.aggregate([
                 {stage: {
                     "path": "description", "query": query, "limit": 1,
-                    "filter": {"ids": {"values": [document_id]}},
+                    "filter": {"ids": {"values": [opensearch_id(document_id)]}},
                 }},
                 {"$project": {"_id": 1, "score": {"$meta": metadata}}},
             ]))
@@ -165,7 +172,7 @@ def main():
         }
     )
     assert_doc(
-        "p999",
+        opensearch_id("p999"),
         lambda source: source["name"] == "Rain Jacket" and "internalNotes" not in source,
         "insert propagation and projection",
     )
@@ -183,7 +190,7 @@ def main():
         },
     )
     assert_doc(
-        "p999",
+        opensearch_id("p999"),
         lambda source: source["name"] == "Storm Jacket" and source["inStock"] is False,
         "replace full reindex",
     )
@@ -199,7 +206,7 @@ def main():
         },
     )
     assert_doc(
-        "p007",
+        opensearch_id("p007"),
         lambda source: source["description"] == "Updated waterproof day pack"
         and source["category"] == "updated-bags",
         "update full reindex",
@@ -207,20 +214,20 @@ def main():
     assert_search_document("p007", "waterproof day pack")
 
     products.delete_one({"_id": "p001"})
-    wait_until("delete propagation", lambda: os_doc("p001")["_source"].get("_sync_deleted") is True)
+    wait_until("delete propagation", lambda: os_doc(opensearch_id("p001"))["_source"].get("_sync_deleted") is True)
 
     for stage in ("$search", "$vectorSearch"):
         wait_until(
             f"{stage} returns no candidates for a deleted document",
             lambda: not list(products.aggregate([{stage: {
                 "path": "description", "query": "hiking backpack", "limit": 1,
-                "filter": {"ids": {"values": ["p001"]}},
+                "filter": {"ids": {"values": [opensearch_id("p001")]}},
             }}])),
             timeout=30,
         )
 
-    p007 = os_doc("p007")
-    assert p007["_id"] == "p007"
+    p007 = os_doc(opensearch_id("p007"))
+    assert p007["_id"] == opensearch_id("p007")
     assert p007["_source"]["_mongo_namespace"] == INDEX
 
     count = os_post(f"/{INDEX}/_count", {

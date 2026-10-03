@@ -8,7 +8,9 @@
 //! - **`FUZZ_DATABASE`** — database name for scratch collections (default `mongo_extension_fuzz`).
 //!
 //! This is **not** LLVM libFuzzer; it is a bounded random driver to stress server + extension parse/exec paths.
-//! Stages match the OpenSearch demo Docker image: **`$search`** and **`$vectorSearch`**.
+//! The shared image loads **`$search`**, **`$vectorSearch`**, **`$fibonacci`**, **`$readLocalJsonl`**,
+//! and **`$rustSdkE2e`**. Search stages exercise connection errors when OpenSearch is absent.
+//! The local stages exercise successful parse and execution.
 
 use std::env;
 use std::process::ExitCode;
@@ -101,6 +103,46 @@ fn random_search_like_inner(rng: &mut StdRng) -> Document {
     inner
 }
 
+const JSONL_FIXTURES: &[&str] = &[
+    "sample.ndjson",
+    "events.jsonl",
+    "nested/stage_params.jsonl",
+];
+
+fn random_fibonacci_stage(rng: &mut StdRng) -> Document {
+    let inner = if rng.gen_bool(0.8) {
+        doc! { "n": rng.gen_range(0i32..=12) }
+    } else {
+        match rng.gen_range(0u8..3) {
+            0 => Document::new(),
+            1 => doc! { "n": "x" },
+            _ => doc! { "n": -1i32 },
+        }
+    };
+    doc! { "$fibonacci": inner }
+}
+
+fn random_jsonl_stage(rng: &mut StdRng) -> Document {
+    let mut inner = if rng.gen_bool(0.75) {
+        doc! { "path": JSONL_FIXTURES[rng.gen_range(0..JSONL_FIXTURES.len())] }
+    } else {
+        doc! { "path": random_ascii(rng, 12) }
+    };
+    if rng.gen_bool(0.35) {
+        inner.insert("maxDocuments", rng.gen_range(0i32..=5));
+    }
+    doc! { "$readLocalJsonl": inner }
+}
+
+fn random_e2e_stage(rng: &mut StdRng) -> Document {
+    let inner = if rng.gen_bool(0.5) {
+        Document::new()
+    } else {
+        doc! { "probe": rng.gen_range(0i32..4), "tag": random_ascii(rng, 8) }
+    };
+    doc! { "$rustSdkE2e": inner }
+}
+
 fn random_search_stage(rng: &mut StdRng) -> Document {
     doc! { "$search": random_search_like_inner(rng) }
 }
@@ -111,13 +153,19 @@ fn random_vector_search_stage(rng: &mut StdRng) -> Document {
 
 /// One or more stages: weighted mix of extension stages; optional trailing `$match` / `$project`.
 fn build_random_pipeline(rng: &mut StdRng) -> Vec<Document> {
-    let first = match rng.gen_range(0u8..4) {
-        0..=1 => random_search_stage(rng),
-        _ => random_vector_search_stage(rng),
+    let first = match rng.gen_range(0u8..5) {
+        0 => random_search_stage(rng),
+        1 => random_vector_search_stage(rng),
+        2 => random_fibonacci_stage(rng),
+        3 => random_jsonl_stage(rng),
+        _ => random_e2e_stage(rng),
     };
     let mut pipe = vec![first];
     if rng.gen_bool(0.14) {
         pipe.push(doc! { "$match": {} });
+    }
+    if rng.gen_bool(0.08) {
+        pipe.push(doc! { "$limit": rng.gen_range(1i32..=5) });
     }
     if rng.gen_bool(0.05) {
         pipe.push(doc! { "$project": { "_id": 1i32 } });
@@ -162,7 +210,7 @@ async fn main() -> ExitCode {
         .unwrap_or(8_000);
 
     eprintln!(
-        "mongo_extension_fuzz uri={uri} iterations={iterations} seed={seed} stages=$search|$vectorSearch max_time_ms={per_ms}"
+        "mongo_extension_fuzz uri={uri} iterations={iterations} seed={seed} stages=$search|$vectorSearch|$fibonacci|$readLocalJsonl|$rustSdkE2e max_time_ms={per_ms}"
     );
 
     let client = match Client::with_uri_str(&uri).await {
@@ -214,7 +262,19 @@ async fn main() -> ExitCode {
     }
 
     eprintln!("done ok={ok} err={err} timeouts={timeouts} (driver/server errors are expected; rising timeouts may indicate stalls)");
-    ExitCode::SUCCESS
+    let code = fuzz_exit_code(ok);
+    if code != ExitCode::SUCCESS {
+        eprintln!("fuzz produced no successful aggregations");
+    }
+    code
+}
+
+fn fuzz_exit_code(ok: u64) -> ExitCode {
+    if ok == 0 {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 #[cfg(test)]
@@ -240,13 +300,72 @@ mod tests {
     }
 
     #[test]
+    fn pipelines_cover_every_loaded_extension() {
+        let mut rng = StdRng::seed_from_u64(11);
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..400 {
+            let pipeline = build_random_pipeline(&mut rng);
+            seen.insert(pipeline[0].keys().next().expect("one key").to_string());
+        }
+        for stage in [
+            "$search",
+            "$vectorSearch",
+            "$fibonacci",
+            "$readLocalJsonl",
+            "$rustSdkE2e",
+        ] {
+            assert!(seen.contains(stage), "missing {stage} in {seen:?}");
+        }
+    }
+
+    #[test]
+    fn local_stages_include_executable_arguments() {
+        let mut rng = StdRng::seed_from_u64(12);
+        let mut fib_ok = false;
+        let mut jsonl_ok = false;
+        for _ in 0..400 {
+            let pipeline = build_random_pipeline(&mut rng);
+            let (name, inner) = pipeline[0].iter().next().expect("stage");
+            let inner = inner.as_document().expect("inner document");
+            if name == "$fibonacci" {
+                if let Ok(n) = inner.get_i32("n") {
+                    if (0..=12).contains(&n) {
+                        fib_ok = true;
+                    }
+                }
+            }
+            if name == "$readLocalJsonl" {
+                if let Ok(path) = inner.get_str("path") {
+                    if matches!(
+                        path,
+                        "sample.ndjson" | "events.jsonl" | "nested/stage_params.jsonl"
+                    ) {
+                        jsonl_ok = true;
+                    }
+                }
+            }
+        }
+        assert!(fib_ok, "no executable $fibonacci stage");
+        assert!(jsonl_ok, "no executable $readLocalJsonl stage");
+    }
+
+    #[test]
+    fn fuzz_run_fails_when_no_iteration_succeeds() {
+        assert_eq!(fuzz_exit_code(0), ExitCode::from(1));
+        assert_eq!(fuzz_exit_code(1), ExitCode::SUCCESS);
+    }
+
+    #[test]
     fn pipeline_first_stage_is_loaded_extension() {
         let mut rng = StdRng::seed_from_u64(5);
         for _ in 0..200 {
             let p = build_random_pipeline(&mut rng);
             let k = p[0].keys().next().expect("one key");
             assert!(
-                matches!(k.as_str(), "$search" | "$vectorSearch"),
+                matches!(
+                    k.as_str(),
+                    "$search" | "$vectorSearch" | "$fibonacci" | "$readLocalJsonl" | "$rustSdkE2e"
+                ),
                 "unexpected stage {k}"
             );
         }
