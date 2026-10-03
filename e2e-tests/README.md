@@ -53,7 +53,7 @@ Override the toolchain image: **`RUST_TEST_IMAGE=my-registry/rust:nightly ./e2e-
 
 ### End-to-end: `mongod` + `mongosh` scripts
 
-Builds the e2e image, starts **`mongod`** from **`mongodb/mongodb-community-server:9.0-ubi9`** with **`featureFlagExtensionsAPI`**, **`--extensionsConfigPath /etc/mongo/extensions`**, and **`--loadExtensions opensearch`**, then runs a load smoke test for **`$search`** and **`$vectorSearch`**. The smoke test expects OpenSearch connection errors because this minimal e2e stack does not start OpenSearch; that still verifies that MongoDB loaded and registered the extension stages instead of rejecting them as unknown stages. The local test library is unsigned, so the harness also sets **`featureFlagExtensionsApiSignatureValidation=false`**; production deployments should use the server’s expected signing/validation flow.
+Builds the e2e image, starts **`mongod`** from **`mongodb/mongodb-community-server:9.0-ubi9`** with **`featureFlagExtensionsAPI`**, **`--extensionsConfigPath /etc/mongo/extensions`**, and **`--loadExtensions opensearch,e2e,fibonacci,datafederation`**. It runs a load smoke test for **`$search`** and **`$vectorSearch`**, then successful aggregations for **`$rustSdkE2e`**, **`$fibonacci`**, and **`$readLocalJsonl`**. The OpenSearch smoke test expects connection errors because this stack does not start OpenSearch; that still verifies that MongoDB loaded and registered those stages. The local test libraries are unsigned, so the harness also sets **`featureFlagExtensionsApiSignatureValidation=false`**; production deployments should use the server’s expected signing/validation flow.
 
 ```bash
 chmod +x e2e-tests/run-e2e.sh
@@ -68,7 +68,7 @@ MONGO_IMAGE=mongodb/mongodb-community-server:9.0-ubi9 ./e2e-tests/run-e2e.sh
 
 ### Random aggregation fuzz (Docker + live `mongod`)
 
-Sends bounded random pipelines mixing **`$search`** and **`$vectorSearch`** (same stack and extension as e2e). Occasionally appends **`$match`** / **`$project`**. Not LLVM libFuzzer; uses **`maxTimeMS`** per aggregate and alternates empty vs non-empty collections.
+Sends bounded random pipelines mixing **`$search`** and **`$vectorSearch`** on the same Compose stack as end-to-end. That image also loads **`$rustSdkE2e`**, **`$fibonacci`**, and **`$readLocalJsonl`**, which this driver does not call. Occasionally appends **`$match`** / **`$project`**. Not LLVM libFuzzer; uses **`maxTimeMS`** per aggregate and alternates empty vs non-empty collections. The stack does not start OpenSearch, so connection errors from those search stages are expected.
 
 ```bash
 chmod +x e2e-tests/run-fuzz-e2e.sh

@@ -247,6 +247,11 @@ macro_rules! export_transform_stage_type {
 /// Defines `get_mongodb_extension` exporting a [`SourceStage`](crate::source_stage::SourceStage)
 /// generator stage (emits documents when there is no upstream executable stage).
 ///
+/// This macro defines `get_mongodb_extension_versions` and `get_mongodb_extension`. A crate can
+/// invoke only one `export_*` macro, because a second one duplicates those symbols. Register
+/// several source stages from one library with [`get_multi_source_extension_impl`](source_stage::get_multi_source_extension_impl)
+/// and a handwritten loader.
+///
 /// Pass the implementing type (unit struct or zero-sized type).
 ///
 /// ```ignore

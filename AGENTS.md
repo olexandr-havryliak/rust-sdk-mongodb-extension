@@ -5,7 +5,10 @@ examples, and Docker tooling for MongoDB server extensions loaded by `mongod` as
 shared libraries.
 
 These instructions apply to any automated or human-assisted coding agent working
-in this repository.
+in this repository. They are mandatory for the whole task. A request to
+implement, fix, or continue does not waive plan confirmation, test-driven
+development, verification, or cleanup. If `.cursorrules` or another repository
+instruction is shorter or older, follow this file.
 
 ---
 
@@ -23,7 +26,7 @@ external source.
 
 - Before implementation, always write a concise plan and wait for explicit user
   confirmation. Do not start editing or coding until the user has approved the
-  plan.
+  plan. A request such as “fix if needed” is not approval of a specific plan.
 - Explain intended changes clearly before performing them so the user can
   confirm the direction with enough context.
 - If implementation reveals multiple reasonable approaches, unclear
@@ -38,7 +41,10 @@ external source.
 - Keep generated or mechanical churn out of commits unless it is required.
 - Always clean up after implementation: remove obsolete code, stale docs,
   dead configuration, unused files, and leftovers from previous approaches when
-  they are no longer part of the current design.
+  they are no longer part of the current design. Before finishing, check the
+  diff and nearby docs, scripts, and configuration for names, commands, and
+  behavior the change made obsolete, and update or remove them in the same
+  change.
 
 ---
 
@@ -160,6 +166,9 @@ guidance.
 
 Avoid:
 
+- Editing or coding before the user confirms the plan.
+- Leaving obsolete code, stale docs, dead configuration, or unused files after a
+  change.
 - Shipping implementation without tests.
 - Adding tests only after implementation.
 - Skipping tests because a change seems simple.

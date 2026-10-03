@@ -8,6 +8,8 @@
 
 use std::cell::Cell;
 use std::ffi::c_void;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 use bson::Document;
@@ -264,15 +266,14 @@ unsafe extern "C" fn parse_expand(
                 id_lookup,
             } => {
                 let blobs = Expansion::pipeline_stage_arg_blobs(g.name, &[extension_stage])?;
-                let extension_ast = Box::into_raw(Box::new(ast_alloc(
-                    blobs
-                        .into_iter()
-                        .next()
-                        .ok_or_else(|| ExtensionError::BadValue("missing extension stage".into()))?,
-                    g,
-                )))
-                .cast::<MongoExtensionAggStageAstNode>();
+                let extension_args = blobs.into_iter().next().ok_or_else(|| {
+                    ExtensionError::BadValue("missing extension stage".into())
+                })?;
+                // Ask the host before allocating the extension AST. A rejected lookup must not
+                // leave that node allocated.
                 let id_lookup_ast = host::create_id_lookup_ast(&id_lookup)?;
+                let extension_ast = Box::into_raw(Box::new(ast_alloc(extension_args, g)))
+                    .cast::<MongoExtensionAggStageAstNode>();
                 let c = Box::new(expanded_multi(vec![extension_ast, id_lookup_ast]));
                 Ok(Box::into_raw(c).cast::<MongoExtensionExpandedArrayContainer>())
             }
@@ -399,7 +400,12 @@ struct AstObj {
     ops: &'static SourceOps,
 }
 
+#[cfg(test)]
+static LIVE_AST_NODES: AtomicUsize = AtomicUsize::new(0);
+
 fn ast_alloc(args: Vec<u8>, ops: &'static SourceOps) -> AstObj {
+    #[cfg(test)]
+    LIVE_AST_NODES.fetch_add(1, Ordering::SeqCst);
     AstObj {
         base: MongoExtensionAggStageAstNode {
             vtable: &AST_VTABLE,
@@ -413,6 +419,8 @@ unsafe fn ast_destroy(p: *mut MongoExtensionAggStageAstNode) {
     if p.is_null() {
         return;
     }
+    #[cfg(test)]
+    LIVE_AST_NODES.fetch_sub(1, Ordering::SeqCst);
     drop(Box::from_raw(p.cast::<AstObj>()));
 }
 
@@ -1167,4 +1175,133 @@ pub unsafe fn get_multi_source_extension_impl(
         *extension_out = std::ptr::addr_of!((*obj).base);
     }
     status::status_ok()
+}
+
+#[cfg(test)]
+mod id_lookup_expand_tests {
+    use super::*;
+    use crate::sys::{
+        MongoExtensionAggStageParseNode, MongoExtensionByteView, MongoExtensionExpandedArrayContainer,
+        MongoExtensionHostServices, MongoExtensionHostServicesVTable, MongoExtensionIdleThreadBlock,
+        MongoExtensionLogger, MongoExtensionStatus, MONGO_EXTENSION_STATUS_OK,
+    };
+
+    fn open_unused(
+        _doc: Document,
+        _ctx: &mut StageContext,
+    ) -> crate::error::Result<*mut c_void> {
+        Ok(std::ptr::null_mut())
+    }
+
+    unsafe fn drop_unused(_ptr: *mut c_void) {}
+
+    unsafe fn next_unused(
+        _ptr: *mut c_void,
+        _ctx: &mut StageContext,
+    ) -> crate::error::Result<Next> {
+        Ok(Next::Eof)
+    }
+
+    fn static_props() -> Document {
+        StagePlan::source_default().static_properties_document()
+    }
+
+    fn expand_with_id_lookup(_doc: Document) -> crate::error::Result<Expansion> {
+        Ok(Expansion::WithHostIdLookup {
+            extension_stage: bson::doc! { "$lookupLeak": { "path": "description", "query": "boots" } },
+            id_lookup: bson::doc! { "$_internalSearchIdLookup": { "limit": 1i32 } },
+        })
+    }
+
+    static OPS: SourceOps = SourceOps {
+        name: "$lookupLeak",
+        expect_empty: false,
+        open_from_doc: open_unused,
+        drop_state: drop_unused,
+        next: next_unused,
+        on_extension_initialized: None,
+        static_properties_doc: static_props,
+        expand_inner: expand_with_id_lookup,
+    };
+
+    unsafe extern "C" fn null_logger() -> *mut MongoExtensionLogger {
+        std::ptr::null_mut()
+    }
+
+    unsafe extern "C" fn status_ok_view(
+        _msg: MongoExtensionByteView,
+    ) -> *mut MongoExtensionStatus {
+        status::status_ok()
+    }
+
+    unsafe extern "C" fn status_ok_idle(
+        _out: *mut *mut MongoExtensionIdleThreadBlock,
+        _name: *const std::ffi::c_char,
+    ) -> *mut MongoExtensionStatus {
+        status::status_ok()
+    }
+
+    unsafe extern "C" fn unused_parse_node(
+        _bson: MongoExtensionByteView,
+        out: *mut *mut MongoExtensionAggStageParseNode,
+    ) -> *mut MongoExtensionStatus {
+        if !out.is_null() {
+            unsafe { *out = std::ptr::null_mut() };
+        }
+        status::status_ok()
+    }
+
+    unsafe extern "C" fn reject_id_lookup(
+        _bson: MongoExtensionByteView,
+        out: *mut *mut MongoExtensionAggStageAstNode,
+    ) -> *mut MongoExtensionStatus {
+        if !out.is_null() {
+            unsafe { *out = std::ptr::null_mut() };
+        }
+        ExtensionError::HostError {
+            code: 17,
+            reason: "rejected id lookup".into(),
+        }
+        .into_raw_status()
+    }
+
+    static SERVICES_VT: MongoExtensionHostServicesVTable = MongoExtensionHostServicesVTable {
+        get_logger: null_logger,
+        user_asserted: status_ok_view,
+        tripwire_asserted: status_ok_view,
+        mark_idle_thread_block: status_ok_idle,
+        create_host_agg_stage_parse_node: unused_parse_node,
+        create_id_lookup: reject_id_lookup,
+    };
+
+    #[test]
+    fn failed_id_lookup_expansion_frees_extension_ast() {
+        let services = MongoExtensionHostServices {
+            vtable: &SERVICES_VT,
+        };
+        host::set_host_services(std::ptr::from_ref(&services));
+        let before = LIVE_AST_NODES.load(Ordering::SeqCst);
+        let args = {
+            let mut bytes = Vec::new();
+            Document::new().to_writer(&mut bytes).unwrap();
+            bytes
+        };
+        let parsed = Box::into_raw(Box::new(parse_alloc(args, &OPS)))
+            .cast::<MongoExtensionAggStageParseNode>();
+        let mut expanded: *mut MongoExtensionExpandedArrayContainer = std::ptr::null_mut();
+        let expand_status = unsafe { parse_expand(parsed, std::ptr::addr_of_mut!(expanded)) };
+        assert!(!expand_status.is_null());
+        unsafe {
+            let code = ((*(*expand_status).vtable).get_code)(expand_status);
+            assert_ne!(code, MONGO_EXTENSION_STATUS_OK);
+            ((*(*expand_status).vtable).destroy)(expand_status);
+            assert!(expanded.is_null());
+            ((*(*parsed).vtable).destroy)(parsed);
+        }
+        assert_eq!(
+            LIVE_AST_NODES.load(Ordering::SeqCst),
+            before,
+            "failed id lookup expansion leaked an AST node"
+        );
+    }
 }

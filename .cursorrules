@@ -4,6 +4,16 @@ You are working in the **Rust SDK for MongoDB Extensions** repository: Rust crat
 
 ---
 
+## Binding guide
+
+Follow **`AGENTS.md`** for every task. It is mandatory. If this file disagrees with **`AGENTS.md`**, follow **`AGENTS.md`**. A request to implement, fix, or continue does not waive plan confirmation, test-driven development, verification, or cleanup.
+
+Before editing or coding, write a concise plan and wait for explicit user confirmation. “Fix if needed” is not approval of a specific plan. If several approaches are reasonable, stop and ask.
+
+Before finishing, remove obsolete code, stale docs, dead configuration, unused files, and leftovers from the previous approach. Check the diff and nearby docs, scripts, and configuration for names, commands, and behavior the change made obsolete.
+
+---
+
 ## Product naming
 
 Use the name **Rust SDK for MongoDB Extensions**. Do **not** use “MongoDB Extension SDK (Rust)” or similar variants in documentation, comments meant for users, or README text.
@@ -77,6 +87,8 @@ Treat each aggregation stage as a **testable unit**. Prefer tests that exercise:
 
 ## Anti-patterns (do not do this)
 
+- Editing or coding before the user confirms the plan.
+- Leaving obsolete code, stale docs, dead configuration, or unused files after a change.
 - Shipping large amounts of implementation without tests.
 - Writing tests only **after** implementation (except when retrofitting; then add failing tests first, then fix).
 - Skipping tests because the logic seems “simple.”
@@ -87,11 +99,15 @@ Treat each aggregation stage as a **testable unit**. Prefer tests that exercise:
 
 ## When you are unsure
 
-Default to this loop:
+Default to the loop in **`AGENTS.md`**:
 
-1. Write a failing test.
-2. Run the tests (**prefer** `./e2e-tests/run-sdk-tests-docker.sh` from repo root) and the end-to-end scripts the change can affect.
-3. Implement the minimal fix.
-4. Refactor with tests still green, then re-run the same end-to-end scripts.
+1. Read the relevant code and docs.
+2. Present a short plan and wait for explicit user confirmation.
+3. Write the smallest failing test that describes the desired behavior.
+4. Run the relevant Docker verification, including end-to-end scripts when the change can affect them.
+5. Implement the minimal fix.
+6. Clean up obsolete code and stale artifacts introduced or exposed by the change.
+7. Re-run verification, including the same end-to-end scripts.
+8. Summarize what changed and what was verified.
 
 TDD is not optional here.

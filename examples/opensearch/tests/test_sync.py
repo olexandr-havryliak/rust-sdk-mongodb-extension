@@ -126,6 +126,32 @@ def main():
 
     assert_search_document("p007", "camp mug coffee tea")
 
+    def assert_ranked_documents(stage, metadata, query):
+        stage_spec = {"path": "description", "query": query, "limit": 3}
+
+        def ranked():
+            rows = list(products.aggregate([
+                {stage: stage_spec},
+                {"$set": {"score": {"$meta": metadata}}},
+            ]))
+            if len(rows) < 2:
+                return False
+            values = [row.get("score") for row in rows]
+            if not all(isinstance(value, (int, float)) and value > 0 for value in values):
+                return False
+            if values != sorted(values, reverse=True):
+                return False
+            for row in rows:
+                row.pop("score")
+                if row != products.find_one({"_id": row["_id"]}):
+                    return False
+            return True
+
+        wait_until(f"{stage} returns ranked MongoDB documents for {query}", ranked, timeout=30)
+
+    assert_ranked_documents("$search", "searchScore", "waterproof")
+    assert_ranked_documents("$vectorSearch", "vectorSearchScore", "waterproof rain shell")
+
     products.insert_one(
         {
             "_id": "p999",
