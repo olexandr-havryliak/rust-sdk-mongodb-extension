@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-export MONGO_IMAGE="${MONGO_IMAGE:-mongo:8.3-rc-noble}"
+export MONGO_IMAGE="${MONGO_IMAGE:-mongodb/mongodb-community-server:9.0-ubi9}"
 export ITERATIONS="${ITERATIONS:-5000}"
 
 COMPOSE=(docker compose -f e2e-tests/docker-compose.yml --project-name rust-sdk-mongo-e2e)
@@ -32,7 +32,7 @@ if [[ -z "${ok:-}" ]]; then
   exit 1
 fi
 
-echo "==> Running mongo_extension_fuzz (ITERATIONS=${ITERATIONS}, stage=\$rustSdkE2e)..."
+echo "==> Running mongo_extension_fuzz (ITERATIONS=${ITERATIONS}, stages=\$search|\$vectorSearch|\$fibonacci|\$readLocalJsonl|\$rustSdkE2e)..."
 "${COMPOSE[@]}" --profile fuzz run --rm fuzz
 
 echo "==> Mongo aggregation fuzz finished (mongod still running; use: docker compose -f e2e-tests/docker-compose.yml --project-name rust-sdk-mongo-e2e down)."

@@ -10,9 +10,8 @@ use extension_sdk_mongodb::default_map_stage_static_properties;
 use extension_sdk_mongodb::map_transform::{get_map_extension_impl, MapStageGlobals};
 use extension_sdk_mongodb::status;
 use extension_sdk_mongodb::sys::{
-    MongoExtension, MongoExtensionAPIVersion, MongoExtensionAPIVersionVector,
-    MongoExtensionAggStageDescriptor, MongoExtensionHostPortal, MongoExtensionStatus,
-    MONGO_EXTENSION_STATUS_OK,
+    MongoExtension, MongoExtensionAggStageDescriptor, MongoExtensionHostPortal,
+    MongoExtensionStatus, MONGO_EXTENSION_STATUS_OK,
 };
 use extension_sdk_mongodb::version::EXTENSION_API_VERSION;
 
@@ -42,14 +41,6 @@ fn eof(_args: &Document) -> Result<Document, String> {
 fn map_initialize_fails_when_register_fails_after_hook() {
     INIT_HOOK_RAN.store(false, Ordering::SeqCst);
     let host = MockHost::new(mock_register_fail);
-    let mut slots = [MongoExtensionAPIVersion {
-        major: EXTENSION_API_VERSION.major,
-        minor: EXTENSION_API_VERSION.minor,
-    }];
-    let vec = MongoExtensionAPIVersionVector {
-        len: 1,
-        versions: slots.as_mut_ptr(),
-    };
     let globals = MapStageGlobals {
         name: "$mapSdkRegFail",
         expect_empty: false,
@@ -63,7 +54,8 @@ fn map_initialize_fails_when_register_fails_after_hook() {
     unsafe {
         let st = get_map_extension_impl(
             globals,
-            std::ptr::addr_of!(vec),
+            EXTENSION_API_VERSION,
+            std::ptr::from_ref(host.services()),
             std::ptr::addr_of_mut!(out),
         );
         assert!(!st.is_null());
@@ -73,11 +65,7 @@ fn map_initialize_fails_when_register_fails_after_hook() {
         assert!(!out.is_null());
 
         let ev = (*out).vtable;
-        let init_st = ((*ev).initialize)(
-            out,
-            std::ptr::from_ref(host.portal()),
-            std::ptr::from_ref(host.services()),
-        );
+        let init_st = ((*ev).initialize)(out, std::ptr::from_ref(host.portal()));
         assert!(!init_st.is_null());
         let iv = (*init_st).vtable;
         assert_ne!(((*iv).get_code)(init_st), MONGO_EXTENSION_STATUS_OK);

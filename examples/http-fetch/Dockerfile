@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
-# MongoDB 8.3 + $httpFetch example. Build from repo root context.
-ARG MONGO_IMAGE=mongo:8.3-rc-noble
+# MongoDB 9.0 + $httpFetch example. Build from repo root context.
+ARG MONGO_IMAGE=mongodb/mongodb-community-server:9.0-ubi9
 
 FROM rust:bookworm AS builder
 WORKDIR /build
@@ -12,6 +12,8 @@ COPY e2e-tests/mongo-extension-fuzz ./e2e-tests/mongo-extension-fuzz
 COPY examples/fibonacci/fibonacci-extension ./examples/fibonacci/fibonacci-extension
 COPY examples/http-fetch/http-fetch-extension ./examples/http-fetch/http-fetch-extension
 COPY examples/data-federation/data-federation-extension ./examples/data-federation/data-federation-extension
+COPY examples/opensearch/extension-core ./examples/opensearch/extension-core
+COPY examples/opensearch/extension ./examples/opensearch/extension
 RUN cargo build -p http_fetch_extension --release
 
 FROM ${MONGO_IMAGE}
@@ -21,8 +23,9 @@ COPY --from=builder /build/target/release/libhttp_fetch_extension.so /usr/local/
 RUN printf '%s\n' 'sharedLibraryPath: /usr/local/lib/mongo-extensions/libhttp_fetch_extension.so' > /etc/mongo/extensions/httpfetch.conf \
     && chmod 644 /etc/mongo/extensions/httpfetch.conf \
     && chmod 755 /usr/local/lib/mongo-extensions/libhttp_fetch_extension.so
-RUN chown -R mongodb:mongodb /etc/mongo/extensions /usr/local/lib/mongo-extensions 2>/dev/null || \
-    chown -R 999:999 /etc/mongo/extensions /usr/local/lib/mongo-extensions
-USER mongodb
+RUN mkdir -p /data/db /data/configdb \
+    && chown -R mongodb:mongodb /etc/mongo/extensions /usr/local/lib/mongo-extensions /data/db /data/configdb 2>/dev/null || \
+    chown -R 999:999 /etc/mongo/extensions /usr/local/lib/mongo-extensions /data/db /data/configdb
+USER 999
 EXPOSE 27017
-CMD ["mongod", "--bind_ip_all", "--setParameter", "featureFlagExtensionsAPI=true", "--loadExtensions", "httpfetch"]
+CMD ["mongod", "--bind_ip_all", "--setParameter", "featureFlagExtensionsAPI=true", "--setParameter", "featureFlagExtensionsApiSignatureValidation=false", "--extensionsConfigPath", "/etc/mongo/extensions", "--loadExtensions", "httpfetch"]

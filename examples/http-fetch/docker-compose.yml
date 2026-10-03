@@ -1,4 +1,4 @@
-# HTTP fetch extension demo (MongoDB 8.3). From repo root:
+# HTTP fetch extension demo (MongoDB 9.0). From repo root:
 #   docker compose -f examples/http-fetch/docker-compose.yml --project-name http-fetch-example up --build
 # Or: ./examples/http-fetch/run-demo.sh
 services:
@@ -7,7 +7,7 @@ services:
       context: ../..
       dockerfile: examples/http-fetch/Dockerfile
       args:
-        MONGO_IMAGE: ${MONGO_IMAGE:-mongo:8.3-rc-noble}
+        MONGO_IMAGE: ${MONGO_IMAGE:-mongodb/mongodb-community-server:9.0-ubi9}
     ports:
       - "27021:27017"
     volumes:

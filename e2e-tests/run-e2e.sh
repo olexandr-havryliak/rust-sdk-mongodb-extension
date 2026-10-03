@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-export MONGO_IMAGE="${MONGO_IMAGE:-mongo:8.3-rc-noble}"
+export MONGO_IMAGE="${MONGO_IMAGE:-mongodb/mongodb-community-server:9.0-ubi9}"
 
 COMPOSE=(docker compose -f e2e-tests/docker-compose.yml --project-name rust-sdk-mongo-e2e)
 
@@ -35,9 +35,9 @@ if [[ -z "${ok:-}" ]]; then
   exit 1
 fi
 
-echo "==> Running aggregation against \$rustSdkE2e (extension YAML param + pipeline checks)..."
+echo "==> Running OpenSearch extension load smoke test..."
 set +e
-out="$("${COMPOSE[@]}" exec -T mongo mongosh --quiet /scripts/aggregate_e2e.js 2>&1)"
+out="$("${COMPOSE[@]}" exec -T mongo mongosh --quiet /scripts/opensearch_extension_load_e2e.js 2>&1)"
 rc=$?
 set -e
 if [[ "$rc" -ne 0 ]]; then
@@ -45,8 +45,24 @@ if [[ "$rc" -ne 0 ]]; then
   echo "mongosh exited with code $rc"
   exit "$rc"
 fi
-if ! grep -q '^E2E_OK$' <<<"$out"; then
+if ! grep -q '^OPENSEARCH_EXTENSION_LOAD_OK$' <<<"$out"; then
   echo "$out"
+  echo "Expected OPENSEARCH_EXTENSION_LOAD_OK in mongosh output"
+  exit 1
+fi
+
+echo "==> Running aggregation against \$rustSdkE2e (extension YAML param + pipeline checks)..."
+set +e
+agg="$("${COMPOSE[@]}" exec -T mongo mongosh --quiet /scripts/aggregate_e2e.js 2>&1)"
+arc=$?
+set -e
+if [[ "$arc" -ne 0 ]]; then
+  echo "$agg"
+  echo "mongosh aggregate e2e exited with code $arc"
+  exit "$arc"
+fi
+if ! grep -q '^E2E_OK$' <<<"$agg"; then
+  echo "$agg"
   echo "Expected E2E_OK in mongosh output"
   exit 1
 fi

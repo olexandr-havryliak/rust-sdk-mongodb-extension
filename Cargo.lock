@@ -1120,6 +1120,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "opensearch_extension"
+version = "0.1.0"
+dependencies = [
+ "bson",
+ "extension-sdk-mongodb",
+ "opensearch_extension_core",
+]
+
+[[package]]
+name = "opensearch_extension_core"
+version = "0.1.0"
+dependencies = [
+ "bson",
+ "extension-sdk-mongodb",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1932,6 +1951,8 @@ dependencies = [
  "once_cell",
  "rustls",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "url",
  "webpki-roots 0.26.11",
 ]

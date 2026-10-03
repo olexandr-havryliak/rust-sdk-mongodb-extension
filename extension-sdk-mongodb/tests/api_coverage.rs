@@ -13,9 +13,10 @@ use extension_sdk_mongodb::panics::ffi_boundary;
 use extension_sdk_mongodb::passthrough::{get_extension_impl, StageGlobals};
 use extension_sdk_mongodb::status;
 use extension_sdk_mongodb::sys::{
-    MongoExtensionAPIVersion, MongoExtensionAPIVersionVector, MongoExtensionHostPortal,
-    MongoExtensionHostPortalVTable, MongoExtensionHostServices, MongoExtensionHostServicesVTable,
-    MongoExtensionStatus, MONGO_EXTENSION_STATUS_OK,
+    MongoExtensionAPIVersion, MongoExtensionAPIVersionVector, MongoExtensionClientType,
+    MongoExtensionHostPortal, MongoExtensionHostPortalVTable, MongoExtensionHostServices,
+    MongoExtensionHostServicesVTable, MongoExtensionPipelineRewriteRule, MongoExtensionStatus,
+    MONGO_EXTENSION_STATUS_OK,
 };
 use extension_sdk_mongodb::version::{host_supports_extension, EXTENSION_API_VERSION};
 
@@ -28,14 +29,62 @@ fn get_mongodb_extension_export_symbol_bytes() {
         extension_sdk_mongodb::sys::GET_MONGODB_EXTENSION_SYMBOL,
     );
     assert!(extension_sdk_mongodb::GET_MONGODB_EXTENSION_SYMBOL.ends_with(b"\0"));
+    assert_eq!(
+        extension_sdk_mongodb::GET_MONGODB_EXTENSION_VERSIONS_SYMBOL,
+        extension_sdk_mongodb::sys::GET_MONGODB_EXTENSION_VERSIONS_SYMBOL,
+    );
+    assert!(extension_sdk_mongodb::GET_MONGODB_EXTENSION_VERSIONS_SYMBOL.ends_with(b"\0"));
 }
 
 // --- version ---
 
 #[test]
 fn extension_api_version_matches_sys_constants() {
+    assert_eq!(EXTENSION_API_VERSION.major, 1);
+    assert_eq!(EXTENSION_API_VERSION.minor, 0);
     assert_eq!(EXTENSION_API_VERSION.major, extension_sdk_mongodb::sys::MONGODB_EXTENSION_API_MAJOR_VERSION);
     assert_eq!(EXTENSION_API_VERSION.minor, extension_sdk_mongodb::sys::MONGODB_EXTENSION_API_MINOR_VERSION);
+}
+
+#[test]
+fn write_supported_versions_publishes_api_1_0() {
+    let mut out = MongoExtensionAPIVersionVector {
+        len: 0,
+        versions: std::ptr::null_mut(),
+    };
+    unsafe {
+        extension_sdk_mongodb::version::write_supported_versions(std::ptr::addr_of_mut!(out));
+        assert_eq!(out.len, 1);
+        assert!(!out.versions.is_null());
+        let versions = std::slice::from_raw_parts(out.versions, out.len as usize);
+        assert_eq!(versions[0].major, 1);
+        assert_eq!(versions[0].minor, 0);
+    }
+}
+
+#[test]
+fn descriptor_and_host_portal_vtables_match_api_1_0_slots() {
+    assert_eq!(
+        std::mem::size_of::<extension_sdk_mongodb::sys::MongoExtensionAggStageDescriptorVTable>(),
+        3 * std::mem::size_of::<usize>()
+    );
+    assert_eq!(
+        std::mem::size_of::<MongoExtensionHostPortalVTable>(),
+        3 * std::mem::size_of::<usize>()
+    );
+    assert_eq!(
+        std::mem::size_of::<extension_sdk_mongodb::sys::MongoExtensionLogicalAggStageVTable>(),
+        15 * std::mem::size_of::<usize>()
+    );
+    assert_eq!(
+        std::mem::size_of::<extension_sdk_mongodb::sys::MongoExtensionExecAggStageVTable>(),
+        9 * std::mem::size_of::<usize>()
+    );
+    assert_eq!(MongoExtensionClientType::kMongoExtensionClientTypeAny as u32, 0);
+    assert_eq!(
+        MongoExtensionClientType::kMongoExtensionClientTypeInternal as u32,
+        1
+    );
 }
 
 #[test]
@@ -67,13 +116,17 @@ fn host_supports_extension_accepts_compatible_slot() {
 fn host_supports_extension_minor_must_meet_extension_minor() {
     let mut slots = [MongoExtensionAPIVersion {
         major: EXTENSION_API_VERSION.major,
-        minor: EXTENSION_API_VERSION.minor.saturating_sub(1),
+        minor: EXTENSION_API_VERSION.minor,
     }];
     let v = MongoExtensionAPIVersionVector {
         len: 1,
         versions: slots.as_mut_ptr(),
     };
-    assert!(!host_supports_extension(&v, EXTENSION_API_VERSION));
+    let newer_extension = MongoExtensionAPIVersion {
+        major: EXTENSION_API_VERSION.major,
+        minor: EXTENSION_API_VERSION.minor + 1,
+    };
+    assert!(!host_supports_extension(&v, newer_extension));
 }
 
 #[test]
@@ -188,6 +241,15 @@ unsafe extern "C" fn mock_get_extension_options(
     }
 }
 
+unsafe extern "C" fn mock_register_stage_rules(
+    _portal: *const MongoExtensionHostPortal,
+    _stage_name: extension_sdk_mongodb::sys::MongoExtensionByteView,
+    _rules: *const MongoExtensionPipelineRewriteRule,
+    _num_rules: usize,
+) -> *mut MongoExtensionStatus {
+    status::status_ok()
+}
+
 unsafe extern "C" fn mock_get_logger() -> *mut extension_sdk_mongodb::sys::MongoExtensionLogger {
     std::ptr::null_mut()
 }
@@ -233,6 +295,7 @@ fn host_set_services_vtable_register_and_extension_options() {
     static HOST_PORTAL_VTABLE: MongoExtensionHostPortalVTable = MongoExtensionHostPortalVTable {
         register_stage_descriptor: mock_register_stage_descriptor,
         get_extension_options: mock_get_extension_options,
+        register_stage_rules: mock_register_stage_rules,
     };
 
     static HOST_SVCS_VTABLE: MongoExtensionHostServicesVTable = MongoExtensionHostServicesVTable {
@@ -282,7 +345,12 @@ fn get_extension_impl_rejects_null_pointers() {
     };
     let mut out: *const extension_sdk_mongodb::sys::MongoExtension = std::ptr::null();
     unsafe {
-        let st = get_extension_impl(globals, std::ptr::null(), std::ptr::addr_of_mut!(out));
+        let st = get_extension_impl(
+            globals,
+            EXTENSION_API_VERSION,
+            std::ptr::null(),
+            std::ptr::addr_of_mut!(out),
+        );
         assert!(!st.is_null());
         let vt = (*st).vtable;
         assert_eq!(((*vt).get_code)(st), -1);
@@ -299,16 +367,28 @@ fn get_extension_impl_rejects_incompatible_api_version() {
         expand_from_args_doc: None,
     };
     let mut out: *const extension_sdk_mongodb::sys::MongoExtension = std::ptr::null();
-    let mut slots = [MongoExtensionAPIVersion {
-        major: EXTENSION_API_VERSION.major,
-        minor: EXTENSION_API_VERSION.minor.saturating_sub(1),
-    }];
-    let vec = MongoExtensionAPIVersionVector {
-        len: 1,
-        versions: slots.as_mut_ptr(),
+    static HOST_SVCS_VTABLE: MongoExtensionHostServicesVTable = MongoExtensionHostServicesVTable {
+        get_logger: mock_get_logger,
+        user_asserted: mock_user_asserted,
+        tripwire_asserted: mock_tripwire_asserted,
+        mark_idle_thread_block: mock_mark_idle_thread_block,
+        create_host_agg_stage_parse_node: mock_create_host_agg_stage_parse_node,
+        create_id_lookup: mock_create_id_lookup,
+    };
+    let svcs = MongoExtensionHostServices {
+        vtable: &HOST_SVCS_VTABLE,
+    };
+    let version = MongoExtensionAPIVersion {
+        major: EXTENSION_API_VERSION.major + 1,
+        minor: EXTENSION_API_VERSION.minor,
     };
     unsafe {
-        let st = get_extension_impl(globals, std::ptr::addr_of!(vec), std::ptr::addr_of_mut!(out));
+        let st = get_extension_impl(
+            globals,
+            version,
+            std::ptr::from_ref(&svcs),
+            std::ptr::addr_of_mut!(out),
+        );
         assert!(!st.is_null());
         let vt = (*st).vtable;
         assert_eq!(((*vt).get_code)(st), -1);

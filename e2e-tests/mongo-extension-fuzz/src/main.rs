@@ -8,7 +8,9 @@
 //! - **`FUZZ_DATABASE`** — database name for scratch collections (default `mongo_extension_fuzz`).
 //!
 //! This is **not** LLVM libFuzzer; it is a bounded random driver to stress server + extension parse/exec paths.
-//! Stages match the e2e Docker image: **`$rustSdkE2e`**, **`$fibonacci`**, **`$readLocalJsonl`** (fixtures under `/federation-data`).
+//! The shared image loads **`$search`**, **`$vectorSearch`**, **`$fibonacci`**, **`$readLocalJsonl`**,
+//! and **`$rustSdkE2e`**. Search stages exercise connection errors when OpenSearch is absent.
+//! The local stages exercise successful parse and execution.
 
 use std::env;
 use std::process::ExitCode;
@@ -76,51 +78,94 @@ fn random_bson_value(rng: &mut StdRng, depth: u8) -> Bson {
     }
 }
 
-fn random_stage_args_rust_sdk_e2e(rng: &mut StdRng) -> Document {
-    random_bson_value(rng, 3)
-        .as_document()
-        .cloned()
-        .unwrap_or_else(|| doc! { "x": 1 })
+fn random_search_like_inner(rng: &mut StdRng) -> Document {
+    let paths = ["name", "description", "category", "nested.text"];
+    let queries = ["waterproof", "rain shell", "day pack", "boots", ""];
+    let mut inner = doc! {
+        "path": paths[rng.gen_range(0..paths.len())],
+        "query": queries[rng.gen_range(0..queries.len())],
+    };
+    if rng.gen_bool(0.45) {
+        let limit = match rng.gen_range(0u8..8) {
+            0 => 0i64,
+            1 => -1i64,
+            2 => 1001i64,
+            _ => rng.gen_range(1i64..=25),
+        };
+        inner.insert("limit", limit);
+    }
+    if rng.gen_bool(0.22) {
+        inner.insert("filter", doc! { "term": { "category": "bags" } });
+    }
+    if rng.gen_bool(0.10) {
+        inner.insert(random_ascii(rng, 10), random_bson_value(rng, 1));
+    }
+    inner
 }
 
-fn random_e2e_stage(rng: &mut StdRng) -> Document {
-    let args = random_stage_args_rust_sdk_e2e(rng);
-    doc! { "$rustSdkE2e": args }
-}
+const JSONL_FIXTURES: &[&str] = &[
+    "sample.ndjson",
+    "events.jsonl",
+    "nested/stage_params.jsonl",
+];
 
 fn random_fibonacci_stage(rng: &mut StdRng) -> Document {
-    let n = match rng.gen_range(0u8..6) {
-        0..=3 => rng.gen_range(0i32..=30),
-        4 => rng.gen_range(-8i32..=-1),
-        _ => rng.gen_range(10_001i32..=10_020),
+    let inner = if rng.gen_bool(0.8) {
+        doc! { "n": rng.gen_range(0i32..=12) }
+    } else {
+        match rng.gen_range(0u8..3) {
+            0 => Document::new(),
+            1 => doc! { "n": "x" },
+            _ => doc! { "n": -1i32 },
+        }
     };
-    doc! { "$fibonacci": { "n": n } }
+    doc! { "$fibonacci": inner }
 }
 
-fn random_read_local_jsonl_stage(rng: &mut StdRng) -> Document {
-    let paths = ["sample.ndjson", "events.jsonl", "nested/stage_params.jsonl"];
-    let path = if rng.gen_bool(0.82) {
-        paths[rng.gen_range(0..paths.len())].to_string()
+fn random_jsonl_stage(rng: &mut StdRng) -> Document {
+    let mut inner = if rng.gen_bool(0.75) {
+        doc! { "path": JSONL_FIXTURES[rng.gen_range(0..JSONL_FIXTURES.len())] }
     } else {
-        random_ascii(rng, 28)
+        doc! { "path": random_ascii(rng, 12) }
     };
-    let mut inner = doc! { "path": path };
-    if rng.gen_bool(0.28) {
-        inner.insert("maxDocuments", Bson::Int64(rng.gen_range(0i64..=64)));
+    if rng.gen_bool(0.35) {
+        inner.insert("maxDocuments", rng.gen_range(0i32..=5));
     }
     doc! { "$readLocalJsonl": inner }
 }
 
+fn random_e2e_stage(rng: &mut StdRng) -> Document {
+    let inner = if rng.gen_bool(0.5) {
+        Document::new()
+    } else {
+        doc! { "probe": rng.gen_range(0i32..4), "tag": random_ascii(rng, 8) }
+    };
+    doc! { "$rustSdkE2e": inner }
+}
+
+fn random_search_stage(rng: &mut StdRng) -> Document {
+    doc! { "$search": random_search_like_inner(rng) }
+}
+
+fn random_vector_search_stage(rng: &mut StdRng) -> Document {
+    doc! { "$vectorSearch": random_search_like_inner(rng) }
+}
+
 /// One or more stages: weighted mix of extension stages; optional trailing `$match` / `$project`.
 fn build_random_pipeline(rng: &mut StdRng) -> Vec<Document> {
-    let first = match rng.gen_range(0u8..10) {
-        0..=4 => random_e2e_stage(rng),
-        5..=6 => random_fibonacci_stage(rng),
-        _ => random_read_local_jsonl_stage(rng),
+    let first = match rng.gen_range(0u8..5) {
+        0 => random_search_stage(rng),
+        1 => random_vector_search_stage(rng),
+        2 => random_fibonacci_stage(rng),
+        3 => random_jsonl_stage(rng),
+        _ => random_e2e_stage(rng),
     };
     let mut pipe = vec![first];
     if rng.gen_bool(0.14) {
         pipe.push(doc! { "$match": {} });
+    }
+    if rng.gen_bool(0.08) {
+        pipe.push(doc! { "$limit": rng.gen_range(1i32..=5) });
     }
     if rng.gen_bool(0.05) {
         pipe.push(doc! { "$project": { "_id": 1i32 } });
@@ -165,7 +210,7 @@ async fn main() -> ExitCode {
         .unwrap_or(8_000);
 
     eprintln!(
-        "mongo_extension_fuzz uri={uri} iterations={iterations} seed={seed} stages=$rustSdkE2e|$fibonacci|$readLocalJsonl max_time_ms={per_ms}"
+        "mongo_extension_fuzz uri={uri} iterations={iterations} seed={seed} stages=$search|$vectorSearch|$fibonacci|$readLocalJsonl|$rustSdkE2e max_time_ms={per_ms}"
     );
 
     let client = match Client::with_uri_str(&uri).await {
@@ -217,7 +262,19 @@ async fn main() -> ExitCode {
     }
 
     eprintln!("done ok={ok} err={err} timeouts={timeouts} (driver/server errors are expected; rising timeouts may indicate stalls)");
-    ExitCode::SUCCESS
+    let code = fuzz_exit_code(ok);
+    if code != ExitCode::SUCCESS {
+        eprintln!("fuzz produced no successful aggregations");
+    }
+    code
+}
+
+fn fuzz_exit_code(ok: u64) -> ExitCode {
+    if ok == 0 {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 #[cfg(test)]
@@ -225,27 +282,77 @@ mod tests {
     use super::*;
 
     #[test]
-    fn e2e_stage_has_operator_key() {
-        let mut rng = StdRng::seed_from_u64(1);
-        let d = random_e2e_stage(&mut rng);
-        assert!(d.contains_key("$rustSdkE2e"));
+    fn search_stage_has_operator_path_and_query() {
+        let mut rng = StdRng::seed_from_u64(6);
+        let d = random_search_stage(&mut rng);
+        let inner = d.get_document("$search").expect("inner");
+        assert!(inner.contains_key("path"));
+        assert!(inner.contains_key("query"));
     }
 
     #[test]
-    fn fibonacci_stage_shape() {
-        let mut rng = StdRng::seed_from_u64(2);
-        let d = random_fibonacci_stage(&mut rng);
-        assert!(d.contains_key("$fibonacci"));
-        let inner = d.get_document("$fibonacci").expect("inner");
-        assert!(inner.contains_key("n"));
+    fn vector_search_stage_has_operator_path_and_query() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let d = random_vector_search_stage(&mut rng);
+        let inner = d.get_document("$vectorSearch").expect("inner");
+        assert!(inner.contains_key("path"));
+        assert!(inner.contains_key("query"));
     }
 
     #[test]
-    fn read_local_jsonl_has_operator_and_path() {
-        let mut rng = StdRng::seed_from_u64(3);
-        let d = random_read_local_jsonl_stage(&mut rng);
-        let inner = d.get_document("$readLocalJsonl").expect("inner");
-        assert!(inner.get_str("path").is_ok());
+    fn pipelines_cover_every_loaded_extension() {
+        let mut rng = StdRng::seed_from_u64(11);
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..400 {
+            let pipeline = build_random_pipeline(&mut rng);
+            seen.insert(pipeline[0].keys().next().expect("one key").to_string());
+        }
+        for stage in [
+            "$search",
+            "$vectorSearch",
+            "$fibonacci",
+            "$readLocalJsonl",
+            "$rustSdkE2e",
+        ] {
+            assert!(seen.contains(stage), "missing {stage} in {seen:?}");
+        }
+    }
+
+    #[test]
+    fn local_stages_include_executable_arguments() {
+        let mut rng = StdRng::seed_from_u64(12);
+        let mut fib_ok = false;
+        let mut jsonl_ok = false;
+        for _ in 0..400 {
+            let pipeline = build_random_pipeline(&mut rng);
+            let (name, inner) = pipeline[0].iter().next().expect("stage");
+            let inner = inner.as_document().expect("inner document");
+            if name == "$fibonacci" {
+                if let Ok(n) = inner.get_i32("n") {
+                    if (0..=12).contains(&n) {
+                        fib_ok = true;
+                    }
+                }
+            }
+            if name == "$readLocalJsonl" {
+                if let Ok(path) = inner.get_str("path") {
+                    if matches!(
+                        path,
+                        "sample.ndjson" | "events.jsonl" | "nested/stage_params.jsonl"
+                    ) {
+                        jsonl_ok = true;
+                    }
+                }
+            }
+        }
+        assert!(fib_ok, "no executable $fibonacci stage");
+        assert!(jsonl_ok, "no executable $readLocalJsonl stage");
+    }
+
+    #[test]
+    fn fuzz_run_fails_when_no_iteration_succeeds() {
+        assert_eq!(fuzz_exit_code(0), ExitCode::from(1));
+        assert_eq!(fuzz_exit_code(1), ExitCode::SUCCESS);
     }
 
     #[test]
@@ -257,7 +364,7 @@ mod tests {
             assert!(
                 matches!(
                     k.as_str(),
-                    "$rustSdkE2e" | "$fibonacci" | "$readLocalJsonl"
+                    "$search" | "$vectorSearch" | "$fibonacci" | "$readLocalJsonl" | "$rustSdkE2e"
                 ),
                 "unexpected stage {k}"
             );

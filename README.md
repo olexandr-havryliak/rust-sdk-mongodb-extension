@@ -4,7 +4,7 @@ Rust workspace that ships **`extension-sdk-mongodb`**, the **Rust SDK for MongoD
 
 The same repository also contains **sample extensions** and a **test harness**; those are documented separately so this file stays focused on the SDK crates.
 
-**MongoDB Extensions ABI:** this tree targets the vendored C API **version 0.1** (`MONGODB_EXTENSION_API_MAJOR_VERSION` **0**, `MONGODB_EXTENSION_API_MINOR_VERSION` **1** in [`include/mongodb_extension_api.h`](include/mongodb_extension_api.h)). Extensions built with the SDK advertise that pair at load time; the server must report a compatible slot in its extension API version vector (see [`extension-sdk-mongodb/src/version.rs`](extension-sdk-mongodb/src/version.rs)).
+**MongoDB Extensions ABI:** this tree targets the vendored C API **version 1.0** (`MONGODB_EXTENSION_API_MAJOR_VERSION` **1**, `MONGODB_EXTENSION_API_MINOR_VERSION` **0** in [`include/mongodb_extension_api.h`](include/mongodb_extension_api.h)). Extensions built with the SDK export `get_mongodb_extension_versions` to advertise that pair, then accept the host-selected version in `get_mongodb_extension` (see [`extension-sdk-mongodb/src/version.rs`](extension-sdk-mongodb/src/version.rs)).
 
 ## Crates
 
@@ -21,7 +21,7 @@ MongoDB owns the query, the aggregation plan, and the cursor. Your extension is 
 
 At a high level, the lifecycle looks like this:
 
-1. **Load** — The server `dlopen`s your library and resolves **`get_mongodb_extension`**. The SDK checks the host’s extension API version vector and registers your stage descriptor when the slot is compatible.
+1. **Load** — The server `dlopen`s your library, resolves **`get_mongodb_extension_versions`**, selects a compatible API version, then calls **`get_mongodb_extension`** with that version and host services. The SDK rejects unsupported versions, caches host services for later callbacks, and registers your stage descriptor during extension initialization.
 2. **Extension initialize** (optional) — If you use hooks such as **`on_init`** on a map transform, the host may call your extension **initialize** while a host **portal** is valid (e.g. to read extension manifest bytes once).
 3. **Parse** — For each stage instance in a pipeline, the host supplies the **full stage BSON** (a single document whose sole top-level key is your stage name). The SDK decodes it, validates the key and inner argument object, and builds whatever parse node the host ABI expects.
 4. **Open / bind** — When execution starts, **source** stages run **`open`**: arguments → owned **`State`**. **Transform** stages typically hold parsed args and wait for the first upstream row; the host wires your stage after an upstream executable stage when the pipeline requires it.
@@ -93,7 +93,7 @@ Until the host binds query execution for a given **`get_next`**, some of these c
 ## Other contracts worth remembering
 
 - **`Send + 'static`** — **`TransformStage`** and **`SourceStage`** implementations must be sendable and not borrow short-lived stack data across host calls.
-- **One exported extension per `cdylib`** — The provided macros emit a single **`get_mongodb_extension`**; the stock layout assumes **one** logical stage registration per shared library.
+- **One loader symbol pair per `cdylib`** — Each `export_*` macro defines **`get_mongodb_extension_versions`** and **`get_mongodb_extension`**, so a crate can use only one of those macros. One extension object can still register multiple stage descriptors: **`get_multi_source_extension_impl`** does that, and the OpenSearch example registers **`$search`** and **`$vectorSearch`** from one shared library.
 - **ABI stability** — Follow the vendored header and the version structs in **`extension-sys-mongodb`**; do not assume layout beyond what the header documents.
 
 ## API quick reference
@@ -114,7 +114,7 @@ Typed arguments and errors also use **`ExtensionError`**, **`parse_args`**, and 
 
 ## Planner static properties (`get_properties`)
 
-The host calls the AST node’s **`get_properties`** to obtain BSON aligned with MongoDB’s **`MongoExtensionStaticProperties`** IDL (see upstream [`extension_agg_stage_static_properties.idl`](https://github.com/mongodb/mongo/blob/v8.3/src/mongo/db/extension/public/extension_agg_stage_static_properties.idl)). The SDK maps that to Rust types in **[`stage_properties`](extension-sdk-mongodb/src/stage_properties.rs)** and groups planner + execution in **[`stage_model::StagePlan`](extension-sdk-mongodb/src/stage_model.rs)**:
+The host calls the AST node’s **`get_properties`** to obtain BSON aligned with MongoDB’s **`MongoExtensionStaticProperties`** IDL (see upstream [`extension_agg_stage_static_properties.idl`](https://github.com/mongodb/mongo/blob/v9.0/src/mongo/db/extension/public/extension_agg_stage_static_properties.idl)). The SDK maps that to Rust types in **[`stage_properties`](extension-sdk-mongodb/src/stage_properties.rs)** and groups planner + execution in **[`stage_model::StagePlan`](extension-sdk-mongodb/src/stage_model.rs)**:
 
 - **`StreamType`** — **`Streaming`** or **`Blocking`** (host field **`streamType`**).
 - **`StagePosition`** — **`Anywhere`**, **`First`**, or **`Last`** (host field **`position`**; **`Anywhere`** maps to IDL **`none`**).
@@ -131,8 +131,8 @@ Re-exports at the crate root: **`StageProperties`**, **`StreamType`**, **`StageP
 
 1. Add a path or crates.io dependency on **`extension-sdk-mongodb`**.
 2. Set **`[lib] crate-type = ["cdylib"]`** so the compiler produces a shared library the server can load.
-3. Invoke exactly **one** of the `export_*` macros so the unmangled **`get_mongodb_extension`** entry point exists.
-4. Install the produced `*.so` and matching extension **`*.conf`** according to MongoDB’s extension host documentation for your server build.
+3. Invoke exactly **one** of the `export_*` macros so the unmangled **`get_mongodb_extension_versions`** and **`get_mongodb_extension`** entry points exist.
+4. Install the produced `*.so` and matching extension **`*.conf`** according to MongoDB’s extension host documentation for your server build. The local Docker harnesses in this repository use the official **`mongodb/mongodb-community-server:9.0-ubi9`** image, **`--extensionsConfigPath /etc/mongo/extensions`**, and **`--loadExtensions ...`**.
 
 Minimal passthrough example:
 

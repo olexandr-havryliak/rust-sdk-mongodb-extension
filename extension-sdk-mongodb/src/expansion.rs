@@ -18,9 +18,29 @@ pub enum Expansion {
     /// [`NAME`](crate::source_stage::SourceStage::NAME) (same encoding as a normal parse node’s
     /// inner object).
     Pipeline(Vec<Document>),
+    /// Replace this stage with an extension-owned candidate source stage followed by a host-owned
+    /// `$_internalSearchIdLookup` AST node.
+    WithHostIdLookup {
+        /// Full stage document for the extension-owned candidate source stage.
+        extension_stage: Document,
+        /// Full stage document for `$_internalSearchIdLookup`.
+        id_lookup: Document,
+    },
 }
 
 impl Expansion {
+    /// Full stage documents in execution order, useful for tests and diagnostics.
+    pub fn stage_documents(&self) -> Vec<Document> {
+        match self {
+            Expansion::SelfStage => Vec::new(),
+            Expansion::Pipeline(stages) => stages.clone(),
+            Expansion::WithHostIdLookup {
+                extension_stage,
+                id_lookup,
+            } => vec![extension_stage.clone(), id_lookup.clone()],
+        }
+    }
+
     /// Validates that each stage document has exactly one key equal to **`stage_name`** and returns
     /// serialized inner argument blobs (same wire shape as stored on the parse node).
     pub fn pipeline_stage_arg_blobs(stage_name: &str, pipeline: &[Document]) -> Result<Vec<Vec<u8>>> {
@@ -84,5 +104,16 @@ mod tests {
     fn pipeline_stage_arg_blobs_rejects_empty_pipeline() {
         let e = Expansion::pipeline_stage_arg_blobs("$x", &[]).unwrap_err();
         assert!(matches!(e, ExtensionError::BadValue(_)));
+    }
+
+    #[test]
+    fn mongot_candidates_with_id_lookup_expansion_keeps_candidate_stage_first() {
+        let expansion = Expansion::WithHostIdLookup {
+            extension_stage: doc! { "$x": { "query": "boots" } },
+            id_lookup: doc! { "$_internalSearchIdLookup": {} },
+        };
+        let stages = expansion.stage_documents();
+        assert_eq!(stages[0], doc! { "$x": { "query": "boots" } });
+        assert_eq!(stages[1], doc! { "$_internalSearchIdLookup": {} });
     }
 }

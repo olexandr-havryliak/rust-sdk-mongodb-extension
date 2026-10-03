@@ -3,8 +3,9 @@
 use extension_sdk_mongodb::host;
 use extension_sdk_mongodb::status;
 use extension_sdk_mongodb::sys::{
-    MongoExtensionHostPortal, MongoExtensionHostPortalVTable, MongoExtensionHostServices,
-    MongoExtensionHostServicesVTable, MongoExtensionStatus,
+    MongoExtensionByteView, MongoExtensionHostPortal, MongoExtensionHostPortalVTable,
+    MongoExtensionHostServices, MongoExtensionHostServicesVTable, MongoExtensionPipelineRewriteRule,
+    MongoExtensionStatus,
 };
 use extension_sdk_mongodb::version::EXTENSION_API_VERSION;
 
@@ -21,6 +22,15 @@ unsafe extern "C" fn mock_get_opts(_: *const MongoExtensionHostPortal) -> extens
         data: OPTS.as_ptr(),
         len: OPTS.len() as u64,
     }
+}
+
+unsafe extern "C" fn mock_register_stage_rules(
+    _: *const MongoExtensionHostPortal,
+    _: MongoExtensionByteView,
+    _: *const MongoExtensionPipelineRewriteRule,
+    _: usize,
+) -> *mut MongoExtensionStatus {
+    status::status_ok()
 }
 
 unsafe extern "C" fn mock_get_logger() -> *mut extension_sdk_mongodb::sys::MongoExtensionLogger {
@@ -68,6 +78,7 @@ fn cache_extension_options_from_portal_populates_snapshot() {
     static PORTAL_VT: MongoExtensionHostPortalVTable = MongoExtensionHostPortalVTable {
         register_stage_descriptor: mock_register,
         get_extension_options: mock_get_opts,
+        register_stage_rules: mock_register_stage_rules,
     };
     static SVCS_VT: MongoExtensionHostServicesVTable = MongoExtensionHostServicesVTable {
         get_logger: mock_get_logger,

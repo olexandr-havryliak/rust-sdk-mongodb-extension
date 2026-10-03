@@ -1,0 +1,20 @@
+const demoProducts = db.getSiblingDB("search_demo").products;
+const demoAssert = require("node:assert/strict");
+
+load("/scripts/demo-upsert.js");
+const original = demoProducts.findOne({ _id: "demo-shell" });
+demoAssert.equal(original.price, 159);
+demoAssert.ok(original.description.toLowerCase().includes("waterproof"));
+load("/scripts/demo-upsert.js");
+demoAssert.equal(demoProducts.countDocuments({ _id: "demo-shell" }), 1);
+load("/scripts/demo-update.js");
+const updated = demoProducts.findOne({ _id: "demo-shell" });
+demoAssert.equal(updated.price, 179);
+demoAssert.equal(updated.inStock, false);
+demoAssert.notEqual(updated.description, original.description);
+demoAssert.equal(updated.internalNotes, original.internalNotes);
+load("/scripts/demo-update.js");
+demoAssert.equal(demoProducts.findOne({ _id: "demo-shell" }).description, updated.description);
+load("/scripts/demo-upsert.js");
+demoAssert.equal(demoProducts.findOne({ _id: "demo-shell" }).description, original.description);
+print("Demo upsert/update script assertions passed");

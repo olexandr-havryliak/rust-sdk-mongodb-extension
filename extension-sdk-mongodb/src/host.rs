@@ -2,7 +2,13 @@
 
 use std::sync::{Mutex, OnceLock};
 
-use crate::sys::{MongoExtensionHostPortal, MongoExtensionHostServicesVTable};
+use bson::Document;
+
+use crate::error::{ExtensionError, Result};
+use crate::sys::{
+    MongoExtensionAggStageAstNode, MongoExtensionByteView, MongoExtensionHostPortal,
+    MongoExtensionHostServicesVTable, MONGO_EXTENSION_STATUS_OK,
+};
 
 static HOST_SERVICES_VTABLE_ADDR: OnceLock<usize> = OnceLock::new();
 
@@ -23,6 +29,55 @@ pub fn host_services_vtable() -> Option<&'static MongoExtensionHostServicesVTabl
         .get()
         .copied()
         .map(|a| unsafe { &*(a as *const MongoExtensionHostServicesVTable) })
+}
+
+/// Ask the host to create an AST node for a `$_internalSearchIdLookup` stage.
+///
+/// This is used by search-like extensions that emit `_id`/score candidate rows and then need the
+/// MongoDB server to fetch the latest full documents from the owning collection.
+pub fn create_id_lookup_ast(spec: &Document) -> Result<*mut MongoExtensionAggStageAstNode> {
+    let vt = host_services_vtable()
+        .ok_or_else(|| ExtensionError::Runtime("host services not initialized".into()))?;
+    let mut raw = Vec::new();
+    spec.to_writer(&mut raw)
+        .map_err(|e| ExtensionError::FailedToParse(e.to_string()))?;
+    let view = MongoExtensionByteView {
+        data: raw.as_ptr(),
+        len: raw.len() as u64,
+    };
+    let mut out: *mut MongoExtensionAggStageAstNode = std::ptr::null_mut();
+    let st = unsafe { (vt.create_id_lookup)(view, std::ptr::addr_of_mut!(out)) };
+    if st.is_null() {
+        return Err(ExtensionError::Runtime(
+            "null status from create_id_lookup".into(),
+        ));
+    }
+    let svt = unsafe { (*st).vtable };
+    let code = unsafe { ((*svt).get_code)(st) };
+    let reason = if code == MONGO_EXTENSION_STATUS_OK {
+        None
+    } else {
+        let view = unsafe { ((*svt).get_reason)(st) };
+        let message = if view.data.is_null() || view.len == 0 {
+            "create_id_lookup failed".to_string()
+        } else {
+            let bytes = unsafe { std::slice::from_raw_parts(view.data, view.len as usize) };
+            String::from_utf8_lossy(bytes).into_owned()
+        };
+        Some(message)
+    };
+    unsafe {
+        ((*svt).destroy)(st);
+    }
+    if let Some(reason) = reason {
+        return Err(ExtensionError::HostError { code, reason });
+    }
+    if out.is_null() {
+        return Err(ExtensionError::Runtime(
+            "create_id_lookup returned null AST node".into(),
+        ));
+    }
+    Ok(out)
 }
 
 /// Call `register_stage_descriptor` on the portal.

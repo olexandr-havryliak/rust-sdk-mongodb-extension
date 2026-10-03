@@ -1,6 +1,7 @@
 //! **Rust SDK for MongoDB Extensions** — build MongoDB server extensions (aggregation stages) as `cdylib` plugins.
 //!
-//! The server loads your `.so` via `dlopen` and resolves [`GET_MONGODB_EXTENSION_SYMBOL`]. The SDK
+//! The server loads your `.so` via `dlopen` and resolves [`GET_MONGODB_EXTENSION_VERSIONS_SYMBOL`]
+//! followed by [`GET_MONGODB_EXTENSION_SYMBOL`]. The SDK
 //! centers on **[`stage_model::StagePlan`]**: planner [`StageProperties`], an
 //! [`stage_model::ExecutionModel`] (**streaming** vs **blocking**), lifecycle shape, and
 //! [`stage_model::Expansion`] for parse-time pipeline lowering. Export macros
@@ -20,7 +21,7 @@
 //! export_transform_stage!("$myRustPass", true);
 //! ```
 //!
-//! Build with `crate-type = ["cdylib"]` and link only [`GET_MONGODB_EXTENSION_SYMBOL`].
+//! Build with `crate-type = ["cdylib"]`; the export macros define the required MongoDB symbols.
 
 #![warn(missing_docs)]
 
@@ -45,7 +46,7 @@ pub mod version;
 
 pub use extension_sys_mongodb as sys;
 
-pub use sys::GET_MONGODB_EXTENSION_SYMBOL;
+pub use sys::{GET_MONGODB_EXTENSION_SYMBOL, GET_MONGODB_EXTENSION_VERSIONS_SYMBOL};
 
 pub use blocking_stage::BlockingStage;
 pub use error::{parse_args, ExtensionError};
@@ -53,7 +54,7 @@ pub use error::Result as ExtensionResult;
 pub use expansion::Expansion;
 pub use map_transform::{get_map_extension_impl, MapStageGlobals};
 pub use passthrough::{get_extension_impl, StageGlobals};
-pub use source_stage::{get_source_extension_impl, SourceOps, SourceStage};
+pub use source_stage::{get_multi_source_extension_impl, get_source_extension_impl, SourceOps, SourceStage};
 pub use stage_context::{OperationMetricsSink, StageContext};
 pub use stage_model::{ExecutionModel, StageLifecycleShape, StagePlan};
 pub use stage_output::Next;
@@ -69,8 +70,16 @@ pub use transform_stage::TransformStage;
 macro_rules! export_transform_stage {
     ($stage:literal, $expect_empty:expr $(,)? ) => {
         #[no_mangle]
+        pub unsafe extern "C" fn get_mongodb_extension_versions(
+            extension_versions: *mut $crate::sys::MongoExtensionAPIVersionVector,
+        ) {
+            $crate::version::write_supported_versions(extension_versions)
+        }
+
+        #[no_mangle]
         pub unsafe extern "C" fn get_mongodb_extension(
-            host_versions: *const $crate::sys::MongoExtensionAPIVersionVector,
+            version: $crate::sys::MongoExtensionAPIVersion,
+            host_services: *const $crate::sys::MongoExtensionHostServices,
             extension_out: *mut *const $crate::sys::MongoExtension,
         ) -> *mut $crate::sys::MongoExtensionStatus {
             let globals = $crate::passthrough::StageGlobals {
@@ -79,7 +88,7 @@ macro_rules! export_transform_stage {
                 static_properties_doc: $crate::stage_properties::default_map_stage_static_properties,
                 expand_from_args_doc: std::option::Option::None,
             };
-            $crate::passthrough::get_extension_impl(globals, host_versions, extension_out)
+            $crate::passthrough::get_extension_impl(globals, version, host_services, extension_out)
         }
     };
 }
@@ -99,8 +108,16 @@ macro_rules! __export_map_stage_common {
         $expand_from_args:expr
     ) => {
         #[no_mangle]
+        pub unsafe extern "C" fn get_mongodb_extension_versions(
+            extension_versions: *mut $crate::sys::MongoExtensionAPIVersionVector,
+        ) {
+            $crate::version::write_supported_versions(extension_versions)
+        }
+
+        #[no_mangle]
         pub unsafe extern "C" fn get_mongodb_extension(
-            host_versions: *const $crate::sys::MongoExtensionAPIVersionVector,
+            version: $crate::sys::MongoExtensionAPIVersion,
+            host_services: *const $crate::sys::MongoExtensionHostServices,
             extension_out: *mut *const $crate::sys::MongoExtension,
         ) -> *mut $crate::sys::MongoExtensionStatus {
             let globals = $crate::map_transform::MapStageGlobals {
@@ -112,7 +129,7 @@ macro_rules! __export_map_stage_common {
                 static_properties_doc: $static_properties_doc,
                 expand_from_args_doc: $expand_from_args,
             };
-            $crate::map_transform::get_map_extension_impl(globals, host_versions, extension_out)
+            $crate::map_transform::get_map_extension_impl(globals, version, host_services, extension_out)
         }
     };
 }
@@ -230,8 +247,12 @@ macro_rules! export_transform_stage_type {
 /// Defines `get_mongodb_extension` exporting a [`SourceStage`](crate::source_stage::SourceStage)
 /// generator stage (emits documents when there is no upstream executable stage).
 ///
-/// Pass the implementing type (unit struct or zero-sized type). Only **one** `export_source_stage!`
-/// may appear per crate (single `get_mongodb_extension` symbol).
+/// This macro defines `get_mongodb_extension_versions` and `get_mongodb_extension`. A crate can
+/// invoke only one `export_*` macro, because a second one duplicates those symbols. Register
+/// several source stages from one library with [`get_multi_source_extension_impl`](source_stage::get_multi_source_extension_impl)
+/// and a handwritten loader.
+///
+/// Pass the implementing type (unit struct or zero-sized type).
 ///
 /// ```ignore
 /// struct MyGen;
@@ -296,13 +317,22 @@ macro_rules! export_source_stage {
             expand_inner: __sdk_source_expand_inner,
         };
         #[no_mangle]
+        pub unsafe extern "C" fn get_mongodb_extension_versions(
+            extension_versions: *mut $crate::sys::MongoExtensionAPIVersionVector,
+        ) {
+            $crate::version::write_supported_versions(extension_versions)
+        }
+
+        #[no_mangle]
         pub unsafe extern "C" fn get_mongodb_extension(
-            host_versions: *const $crate::sys::MongoExtensionAPIVersionVector,
+            version: $crate::sys::MongoExtensionAPIVersion,
+            host_services: *const $crate::sys::MongoExtensionHostServices,
             extension_out: *mut *const $crate::sys::MongoExtension,
         ) -> *mut $crate::sys::MongoExtensionStatus {
             $crate::source_stage::get_source_extension_impl(
                 &__SDK_SOURCE_OPS,
-                host_versions,
+                version,
+                host_services,
                 extension_out,
             )
         }
