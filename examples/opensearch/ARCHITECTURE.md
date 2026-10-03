@@ -65,6 +65,7 @@ After model setup, [indexer/indexer.py](indexer/indexer.py) reads
 | Field | OpenSearch type |
 | --- | --- |
 | `_mongo_namespace` | `keyword` |
+| `_mongo_id` | `keyword` |
 | `_sync_deleted` | `boolean` |
 | `_sync_topic_id` | `keyword` |
 | `name` | `text` |
@@ -78,7 +79,11 @@ After model setup, [indexer/indexer.py](indexer/indexer.py) reads
 The `search` tag creates a text field. The `vectorSearch` tag also creates
 `<field>_embedding`. `filter` and `sort` fields use their configured scalar types.
 Only configured fields are sent to OpenSearch, plus namespace and sync metadata.
-MongoDB `_id` becomes the OpenSearch document ID.
+MongoDB `_id` becomes the OpenSearch document ID. `_mongo_id` keeps that `_id`
+as JSON so `$search` and `$vectorSearch` can emit the original BSON type to
+`$_internalSearchIdLookup`. The connector's simplified JSON does not distinguish
+int32 from int64: a bare JSON integer that fits in int32 is restored as int32,
+while `$numberInt`, `$numberLong`, and `$oid` keep the type they declare.
 
 The indexer consumes Kafka messages and fully reindexes each inserted, replaced,
 or updated document. A delete creates a persistent fence document, excluded from

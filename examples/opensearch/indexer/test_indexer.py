@@ -58,6 +58,7 @@ class StreamTests(unittest.TestCase):
         body, _, _ = indexer.build_index_body(CONFIG, STREAM)
         self.assertEqual(body["mappings"]["_meta"]["stream"], STREAM)
         self.assertEqual(body["mappings"]["properties"]["_sync_deleted"], {"type": "boolean"})
+        self.assertEqual(body["mappings"]["properties"]["_mongo_id"], {"type": "keyword"})
 
     def test_different_configuration_changes_contract(self):
         a = indexer.build_index_body(CONFIG, STREAM)[0]
@@ -106,6 +107,7 @@ class WriteTests(unittest.TestCase):
         self.assertEqual(args["version_type"], "external")
         self.assertEqual(args["id"], "p1")
         self.assertNotIn("_id", args["body"])
+        self.assertEqual(args["body"]["_mongo_id"], '"p1"')
         self.assertFalse(args["body"]["_sync_deleted"])
         self.assertEqual(args["body"]["_sync_topic_id"], STREAM["topic_id"])
 
@@ -194,7 +196,19 @@ class ProjectionTests(unittest.TestCase):
         config = {"fields": {"details.name": {"sourcePath": "original.title"}}}
         source = {"_id": "id", "original": {"title": "test"}, "secret": "hidden"}
         self.assertEqual(indexer.project_document(TOPIC, config, source), {
-            "_id": "id", "_mongo_namespace": TOPIC, "details": {"name": "test"}})
+            "_id": "id", "_mongo_id": '"id"', "_mongo_namespace": TOPIC,
+            "details": {"name": "test"}})
+
+    def test_integer_id_keeps_json_for_typed_lookup(self):
+        projected = indexer.project_document(TOPIC, {"fields": {}}, {"_id": 1, "name": "n"})
+        self.assertEqual(projected["_id"], 1)
+        self.assertEqual(projected["_mongo_id"], "1")
+
+    def test_extended_object_id_keeps_original_json(self):
+        oid = {"$oid": "507f1f77bcf86cd799439011"}
+        projected = indexer.project_document(TOPIC, {"fields": {}}, {"_id": oid})
+        self.assertEqual(projected["_id"], "507f1f77bcf86cd799439011")
+        self.assertEqual(projected["_mongo_id"], '{"$oid":"507f1f77bcf86cd799439011"}')
 
     def test_mongo_extended_ids(self):
         for key in ("$oid", "$uuid"):

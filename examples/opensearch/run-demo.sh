@@ -11,7 +11,7 @@ Usage: ./examples/opensearch/run-demo.sh [up|test|query|down|logs]
 
 Commands:
   up     Build and start the MongoDB -> Kafka -> OpenSearch stack.
-  test   Build/start the stack and run the Docker-only sync tests.
+  test   Reset volumes, build/start the stack, and run the Docker-only sync tests.
   query  Run prepared MongoDB $search / $vectorSearch demo queries.
   down   Stop and remove the stack volumes.
   logs   Follow stack logs.
@@ -27,6 +27,7 @@ case "$cmd" in
     docker compose -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" --profile dashboards up -d --build
     ;;
   test)
+    docker compose -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" --profile dashboards --profile test down -v
     docker compose -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" build indexer-tests
     docker compose -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" run --rm --no-deps indexer-tests
     docker compose -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" up -d --build indexer

@@ -93,7 +93,7 @@ Until the host binds query execution for a given **`get_next`**, some of these c
 ## Other contracts worth remembering
 
 - **`Send + 'static`** — **`TransformStage`** and **`SourceStage`** implementations must be sendable and not borrow short-lived stack data across host calls.
-- **One exported extension per `cdylib`** — The provided macros emit one loader symbol pair (**`get_mongodb_extension_versions`** and **`get_mongodb_extension`**); the stock layout assumes **one** logical stage registration per shared library.
+- **One loader symbol pair per `cdylib`** — Each `export_*` macro defines **`get_mongodb_extension_versions`** and **`get_mongodb_extension`**, so a crate can use only one of those macros. One extension object can still register multiple stage descriptors: **`get_multi_source_extension_impl`** does that, and the OpenSearch example registers **`$search`** and **`$vectorSearch`** from one shared library.
 - **ABI stability** — Follow the vendored header and the version structs in **`extension-sys-mongodb`**; do not assume layout beyond what the header documents.
 
 ## API quick reference

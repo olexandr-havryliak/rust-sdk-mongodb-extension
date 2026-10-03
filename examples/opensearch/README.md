@@ -159,7 +159,8 @@ docker compose -f examples/opensearch/docker-compose.yml --project-name opensear
 
 ## Automated Tests
 
-Run synchronization and search tests on a fresh stack, before manual inserts:
+Run synchronization and search tests on a fresh stack, before manual inserts.
+This command removes the Compose project's volumes first:
 
 ```bash
 ./examples/opensearch/run-demo.sh test

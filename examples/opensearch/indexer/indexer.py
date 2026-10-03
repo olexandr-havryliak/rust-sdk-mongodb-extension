@@ -90,6 +90,7 @@ def mapping_type(field):
 def build_index_body(namespace_config, stream=None):
     properties = {
         "_mongo_namespace": {"type": "keyword"},
+        "_mongo_id": {"type": "keyword"},
         "_sync_deleted": {"type": "boolean"},
         "_sync_topic_id": {"type": "keyword"},
     }
@@ -259,15 +260,22 @@ def document_id_from_key(key):
     return extract_id(decoded.get("_id"))
 
 
+def preserved_mongo_id(raw):
+    """JSON text of the original `_id`, stored so search can rebuild its BSON type."""
+    return json.dumps(raw, separators=(",", ":"), sort_keys=True)
+
+
 def project_document(namespace, namespace_config, document):
     if not isinstance(document, dict):
         raise ValueError("Kafka value must be a JSON document")
     if "_id" not in document:
         raise ValueError("Kafka document is missing _id")
 
+    original_id = document["_id"]
     projected = {
-        "_id": extract_id(document["_id"]),
+        "_id": extract_id(original_id),
         "_mongo_namespace": namespace,
+        "_mongo_id": preserved_mongo_id(original_id),
     }
     for output_name, field_config in namespace_config.get("fields", {}).items():
         value = get_path(document, field_config.get("sourcePath", output_name))

@@ -71,9 +71,30 @@ Agents must execute this script when verifying Rust tests unless Docker is
 unavailable in the current environment. If Docker is unavailable, say so clearly
 and still leave the change test-complete.
 
-Broader checks:
+End-to-end tests are mandatory for the same change when it can affect the code,
+configuration, or scripts those tests exercise. Skip an end-to-end script only
+when the diff cannot change what that script builds or runs. Documentation-only
+edits that do not change commands, scripts, Dockerfiles, or expected runtime
+behavior are the usual case for skipping end-to-end tests.
 
-- End-to-end MongoDB extension flow: `./e2e-tests/run-e2e.sh`
+When the change can affect the shared MongoDB extension flow, run:
+
+```bash
+./e2e-tests/run-e2e.sh
+```
+
+When the change can affect an example stack, run that example's end-to-end
+command as well. For the OpenSearch example:
+
+```bash
+./examples/opensearch/run-demo.sh test
+```
+
+Agents must execute these scripts, not only suggest them, unless Docker is
+unavailable. If Docker is unavailable, say so clearly.
+
+Other checks:
+
 - Miri / undefined behavior checks: `./e2e-tests/run-miri-docker.sh`
 - Additional compose flows: see `e2e-tests/README.md`
 
@@ -154,9 +175,10 @@ Avoid:
 1. Read the relevant code and docs.
 2. Present a short plan and wait for explicit user confirmation.
 3. Write the smallest failing test that describes the desired behavior.
-4. Run the relevant Docker verification.
+4. Run the relevant Docker verification, including end-to-end scripts when the
+   change can affect them.
 5. Implement the minimal fix.
 6. Clean up obsolete code and stale artifacts introduced or exposed by the
    change.
-7. Re-run verification.
+7. Re-run verification, including the same end-to-end scripts.
 8. Summarize what changed and what was verified.

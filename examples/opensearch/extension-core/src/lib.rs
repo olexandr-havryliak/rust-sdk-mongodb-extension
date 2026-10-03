@@ -72,13 +72,23 @@ fn bson_i64(args: &Document, key: &str, default: i64, min: i64, max: i64) -> Ext
     Ok(parsed)
 }
 
+fn optional_filter(args: &Document) -> ExtensionResult<Option<Document>> {
+    match args.get("filter") {
+        None => Ok(None),
+        Some(Bson::Document(filter)) => Ok(Some(filter.clone())),
+        Some(_) => Err(ExtensionError::BadValue(
+            "filter must be a document".into(),
+        )),
+    }
+}
+
 pub fn parse_search_args(args: Document) -> ExtensionResult<QueryArgs> {
     Ok(QueryArgs {
         kind: QueryKind::Search,
         path: bson_string(&args, "path")?,
         query: bson_string(&args, "query")?,
         limit: bson_i64(&args, "limit", DEFAULT_LIMIT, 1, MAX_LIMIT)?,
-        filter: args.get_document("filter").ok().cloned(),
+        filter: optional_filter(&args)?,
     })
 }
 
@@ -88,7 +98,7 @@ pub fn parse_vector_search_args(args: Document) -> ExtensionResult<QueryArgs> {
         path: bson_string(&args, "path")?,
         query: bson_string(&args, "query")?,
         limit: bson_i64(&args, "limit", DEFAULT_LIMIT, 1, MAX_LIMIT)?,
-        filter: args.get_document("filter").ok().cloned(),
+        filter: optional_filter(&args)?,
     })
 }
 
@@ -180,7 +190,7 @@ pub fn opensearch_body(args: &QueryArgs) -> Value {
             }
             json!({
                 "size": args.limit,
-                "_source": false,
+                "_source": ["_mongo_id"],
                 "query": {
                     "bool": {
                         "must": [{ "match": { args.path.clone(): args.query.clone() } }],
@@ -202,7 +212,7 @@ pub fn opensearch_body(args: &QueryArgs) -> Value {
             }});
             json!({
                 "size": args.limit,
-                "_source": false,
+                "_source": ["_mongo_id"],
                 "query": {
                     "neural": {
                         format!("{}_embedding", args.path): neural
@@ -291,16 +301,115 @@ fn fetch_candidates_from_endpoint(
         .ok_or_else(|| "OpenSearch response missing hits.hits".to_string())?;
     let mut out = Vec::with_capacity(hits.len());
     for hit in hits {
-        let id = hit
-            .get("_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "OpenSearch hit missing _id".to_string())?;
-        let score = hit.get("_score").and_then(Value::as_f64).unwrap_or(0.0);
-        let mut candidate = doc! { "_id": id };
-        candidate.insert(score_key, score);
-        out.push(candidate);
+        out.push(candidate_from_hit(hit, score_key)?);
     }
     Ok(out)
+}
+
+fn candidate_from_hit(hit: &Value, score_key: &str) -> Result<Document, String> {
+    let id = bson_id_from_hit(hit)?;
+    let score = hit.get("_score").and_then(Value::as_f64).unwrap_or(0.0);
+    let mut candidate = Document::new();
+    candidate.insert("_id", id);
+    candidate.insert(score_key, score);
+    Ok(candidate)
+}
+
+fn bson_id_from_hit(hit: &Value) -> Result<Bson, String> {
+    if let Some(preserved) = hit.pointer("/_source/_mongo_id") {
+        let text = preserved
+            .as_str()
+            .ok_or_else(|| "OpenSearch _mongo_id must be a string".to_string())?;
+        let value: Value = serde_json::from_str(text)
+            .map_err(|err| format!("OpenSearch _mongo_id json: {err}"))?;
+        return bson_id_from_json(&value);
+    }
+    let id = hit
+        .get("_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "OpenSearch hit missing _id".to_string())?;
+    Ok(Bson::String(id.to_string()))
+}
+
+fn bson_id_from_json(value: &Value) -> Result<Bson, String> {
+    match value {
+        Value::String(text) => Ok(Bson::String(text.clone())),
+        Value::Number(number) => bson_id_from_json_number(number),
+        Value::Object(fields) if fields.len() == 1 => decode_extended_id(fields),
+        _ => Err("preserved MongoDB _id is not a supported BSON id".into()),
+    }
+}
+
+/// Simplified JSON emits ordinary integers as JSON numbers and drops the BSON
+/// int32/int64 distinction. Values that fit in int32 are restored as int32, which
+/// is what mongosh and the connector emit for `_id: 1`. Explicit `$numberInt` and
+/// `$numberLong` forms keep the width they declare.
+fn bson_id_from_json_number(number: &serde_json::Number) -> Result<Bson, String> {
+    if let Some(value) = number.as_i64() {
+        if (i32::MIN as i64..=i32::MAX as i64).contains(&value) {
+            return Ok(Bson::Int32(value as i32));
+        }
+        return Ok(Bson::Int64(value));
+    }
+    if let Some(value) = number.as_u64() {
+        if value <= i32::MAX as u64 {
+            return Ok(Bson::Int32(value as i32));
+        }
+        if value <= i64::MAX as u64 {
+            return Ok(Bson::Int64(value as i64));
+        }
+        return Err(format!("preserved MongoDB _id integer is too large: {value}"));
+    }
+    let value = number
+        .as_f64()
+        .ok_or_else(|| "preserved MongoDB _id number is not finite".to_string())?;
+    if !value.is_finite() {
+        return Err("preserved MongoDB _id number is not finite".into());
+    }
+    Ok(Bson::Double(value))
+}
+
+fn decode_extended_id(fields: &serde_json::Map<String, Value>) -> Result<Bson, String> {
+    let (key, value) = fields
+        .iter()
+        .next()
+        .ok_or_else(|| "preserved MongoDB _id object is empty".to_string())?;
+    let text = value
+        .as_str()
+        .ok_or_else(|| format!("{key} must be a string"))?;
+    match key.as_str() {
+        "$oid" => {
+            let oid = bson::oid::ObjectId::parse_str(text)
+                .map_err(|err| format!("invalid $oid: {err}"))?;
+            Ok(Bson::ObjectId(oid))
+        }
+        "$uuid" => {
+            let uuid = bson::Uuid::parse_str(text).map_err(|err| format!("invalid $uuid: {err}"))?;
+            Ok(Bson::Binary(bson::Binary::from_uuid(uuid)))
+        }
+        "$numberInt" => {
+            let parsed = text
+                .parse::<i32>()
+                .map_err(|_| format!("invalid $numberInt: {text}"))?;
+            Ok(Bson::Int32(parsed))
+        }
+        "$numberLong" => {
+            let parsed = text
+                .parse::<i64>()
+                .map_err(|_| format!("invalid $numberLong: {text}"))?;
+            Ok(Bson::Int64(parsed))
+        }
+        "$numberDouble" => {
+            let parsed = text
+                .parse::<f64>()
+                .map_err(|_| format!("invalid $numberDouble: {text}"))?;
+            if !parsed.is_finite() {
+                return Err("preserved MongoDB _id double is not finite".into());
+            }
+            Ok(Bson::Double(parsed))
+        }
+        other => Err(format!("unsupported preserved MongoDB _id type {other}")),
+    }
 }
 
 fn score_metadata_key(kind: &QueryKind) -> &'static str {
@@ -364,11 +473,39 @@ mod tests {
     }
 
     #[test]
-    fn search_body_uses_match_and_source_false() {
+    fn search_rejects_non_document_filter() {
+        let err = parse_search_args(doc! {
+            "path": "description",
+            "query": "boots",
+            "filter": "category",
+        })
+        .expect_err("string filter");
+        assert!(
+            matches!(err, ExtensionError::BadValue(ref msg) if msg.contains("filter")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn vector_search_rejects_non_document_filter() {
+        let err = parse_vector_search_args(doc! {
+            "path": "description",
+            "query": "boots",
+            "filter": [1i32],
+        })
+        .expect_err("array filter");
+        assert!(
+            matches!(err, ExtensionError::BadValue(ref msg) if msg.contains("filter")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn search_body_requests_preserved_mongo_id() {
         let args = parse_search_args(doc! { "path": "description", "query": "boots" }).unwrap();
         let body = opensearch_body(&args);
         assert_eq!(body["size"], 10);
-        assert_eq!(body["_source"], false);
+        assert_eq!(body["_source"], json!(["_mongo_id"]));
         assert_eq!(body["query"]["bool"]["must"][0]["match"]["description"], "boots");
     }
 
@@ -408,6 +545,7 @@ mod tests {
             "rain shell"
         );
         assert!(body["query"]["neural"]["description_embedding"]["model_id"].is_null());
+        assert_eq!(body["_source"], json!(["_mongo_id"]));
     }
 
     #[test]
@@ -499,5 +637,57 @@ mod tests {
         };
         assert_eq!(document, doc! { "_id": "p003" });
         assert_eq!(metadata, Some(doc! { "$vectorSearchScore": 0.75 }));
+    }
+
+    #[test]
+    fn candidate_keeps_string_id_when_preserved_id_is_absent() {
+        let hit = json!({ "_id": "p001", "_score": 1.5 });
+        let doc = candidate_from_hit(&hit, "$searchScore").unwrap();
+        assert_eq!(doc, doc! { "_id": "p001", "$searchScore": 1.5 });
+    }
+
+    #[test]
+    fn candidate_restores_preserved_string_id() {
+        let hit = json!({
+            "_id": "ignored",
+            "_score": 2.0,
+            "_source": { "_mongo_id": "\"p001\"" }
+        });
+        let doc = candidate_from_hit(&hit, "$searchScore").unwrap();
+        assert_eq!(doc.get("_id"), Some(&Bson::String("p001".into())));
+    }
+
+    #[test]
+    fn candidate_restores_small_json_integer_as_int32() {
+        let hit = json!({
+            "_id": "1",
+            "_score": 1.0,
+            "_source": { "_mongo_id": "1" }
+        });
+        let doc = candidate_from_hit(&hit, "$searchScore").unwrap();
+        assert_eq!(doc.get("_id"), Some(&Bson::Int32(1)));
+    }
+
+    #[test]
+    fn candidate_restores_object_id() {
+        let oid = bson::oid::ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap();
+        let hit = json!({
+            "_id": "507f1f77bcf86cd799439011",
+            "_score": 1.0,
+            "_source": { "_mongo_id": "{\"$oid\":\"507f1f77bcf86cd799439011\"}" }
+        });
+        let doc = candidate_from_hit(&hit, "$searchScore").unwrap();
+        assert_eq!(doc.get("_id"), Some(&Bson::ObjectId(oid)));
+    }
+
+    #[test]
+    fn candidate_restores_number_long_that_fits_in_int32() {
+        let hit = json!({
+            "_id": "1",
+            "_score": 1.0,
+            "_source": { "_mongo_id": "{\"$numberLong\":\"1\"}" }
+        });
+        let doc = candidate_from_hit(&hit, "$searchScore").unwrap();
+        assert_eq!(doc.get("_id"), Some(&Bson::Int64(1)));
     }
 }

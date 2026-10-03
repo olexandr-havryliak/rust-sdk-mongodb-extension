@@ -917,6 +917,7 @@ unsafe extern "C" fn exec_get_next(
         }
         let mut sctx = StageContext::new();
         let metrics = (*this).metrics.get();
+        sctx.bind_catalog((*this).catalog.clone());
         sctx.bind_execution(ctx, metrics);
         let out = (ops.next)((*this).state, &mut sctx)?;
         sctx.unbind_execution();
@@ -1110,7 +1111,12 @@ pub unsafe fn get_source_extension_impl(
     get_multi_source_extension_impl(&[ops], version, host_services, extension_out)
 }
 
-/// Called from multi-source export helpers with static [`SourceOps`] tables for every concrete stage.
+/// Builds one MongoDB extension that registers every source stage in `ops`.
+///
+/// The `export_*` macros each define `get_mongodb_extension_versions` and
+/// `get_mongodb_extension`, so a crate can use only one of those macros. Call this
+/// function from a hand-written loader when one shared library must register more
+/// than one source stage.
 pub unsafe fn get_multi_source_extension_impl(
     ops: &[&'static SourceOps],
     version: crate::sys::MongoExtensionAPIVersion,
