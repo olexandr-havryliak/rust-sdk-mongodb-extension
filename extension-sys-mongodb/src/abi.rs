@@ -1,14 +1,15 @@
 //! Manual `#[repr(C)]` layout matching `mongodb_extension_api.h` (MongoDB Extensions public API).
 
 /// Must match `MONGODB_EXTENSION_API_MAJOR_VERSION` in `api.h`.
-pub const MONGODB_EXTENSION_API_MAJOR_VERSION: u32 = 0;
+pub const MONGODB_EXTENSION_API_MAJOR_VERSION: u32 = 1;
 /// Must match `MONGODB_EXTENSION_API_MINOR_VERSION` in `api.h`.
-pub const MONGODB_EXTENSION_API_MINOR_VERSION: u32 = 1;
+pub const MONGODB_EXTENSION_API_MINOR_VERSION: u32 = 0;
 
 pub const MONGO_EXTENSION_STATUS_RUNTIME_ERROR: i32 = -1;
 pub const MONGO_EXTENSION_STATUS_OK: i32 = 0;
 
 pub const GET_MONGODB_EXTENSION_SYMBOL: &[u8] = b"get_mongodb_extension\0";
+pub const GET_MONGODB_EXTENSION_VERSIONS_SYMBOL: &[u8] = b"get_mongodb_extension_versions\0";
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -217,6 +218,13 @@ pub enum MongoExtensionAggStageNodeType {
     kAstNode = 1,
 }
 
+#[repr(u32)]
+#[derive(Clone, Copy)]
+pub enum MongoExtensionClientType {
+    kMongoExtensionClientTypeAny = 0,
+    kMongoExtensionClientTypeInternal = 1,
+}
+
 #[repr(C)]
 pub struct MongoExtensionAggStageDescriptor {
     pub vtable: *const MongoExtensionAggStageDescriptorVTable,
@@ -225,6 +233,8 @@ pub struct MongoExtensionAggStageDescriptor {
 #[repr(C)]
 pub struct MongoExtensionAggStageDescriptorVTable {
     pub get_name: unsafe extern "C" fn(*const MongoExtensionAggStageDescriptor) -> MongoExtensionByteView,
+    pub get_client_type:
+        unsafe extern "C" fn(*const MongoExtensionAggStageDescriptor) -> MongoExtensionClientType,
     pub parse: unsafe extern "C" fn(
         *const MongoExtensionAggStageDescriptor,
         MongoExtensionByteView,
@@ -331,6 +341,23 @@ pub struct MongoExtensionQueryExecutionContext {
 }
 
 #[repr(C)]
+pub struct MongoExtensionPipelineRewriteContext {
+    pub vtable: *const std::ffi::c_void,
+}
+
+#[repr(C)]
+pub struct MongoExtensionPipelineDependencies {
+    pub vtable: *const std::ffi::c_void,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy)]
+pub enum MongoExtensionStreamType {
+    kMongoExtensionStreamTypeDocResult = 0,
+    kMongoExtensionStreamTypeMetaResult = 1,
+}
+
+#[repr(C)]
 pub struct MongoExtensionExecAggStageVTable {
     pub destroy: unsafe extern "C" fn(*mut MongoExtensionExecAggStage),
     pub get_next: unsafe extern "C" fn(
@@ -352,6 +379,7 @@ pub struct MongoExtensionExecAggStageVTable {
     pub close: unsafe extern "C" fn(*mut MongoExtensionExecAggStage) -> *mut MongoExtensionStatus,
     pub explain: unsafe extern "C" fn(
         *const MongoExtensionExecAggStage,
+        *mut MongoExtensionQueryExecutionContext,
         MongoExtensionExplainVerbosity,
         *mut *mut MongoExtensionByteBuf,
     ) -> *mut MongoExtensionStatus,
@@ -451,6 +479,7 @@ pub struct MongoExtensionLogicalAggStageVTable {
     ) -> *mut MongoExtensionStatus,
     pub explain: unsafe extern "C" fn(
         *const MongoExtensionLogicalAggStage,
+        *mut MongoExtensionQueryExecutionContext,
         MongoExtensionExplainVerbosity,
         *mut *mut MongoExtensionByteBuf,
     ) -> *mut MongoExtensionStatus,
@@ -466,13 +495,41 @@ pub struct MongoExtensionLogicalAggStageVTable {
         *const MongoExtensionLogicalAggStage,
         *mut *mut MongoExtensionLogicalAggStage,
     ) -> *mut MongoExtensionStatus,
-    pub is_stage_sorted_by_vector_search_score: unsafe extern "C" fn(
-        *const MongoExtensionLogicalAggStage,
-        *mut bool,
-    ) -> *mut MongoExtensionStatus,
-    pub set_vector_search_limit_for_optimization: unsafe extern "C" fn(
+    pub set_vector_search_limit_for_optimization_deprecated: unsafe extern "C" fn(
         *mut MongoExtensionLogicalAggStage,
         *mut i64,
+    ) -> *mut MongoExtensionStatus,
+    pub evaluate_pipeline_rewrite_rule_precondition: unsafe extern "C" fn(
+        *const MongoExtensionLogicalAggStage,
+        MongoExtensionByteView,
+        *const MongoExtensionPipelineRewriteContext,
+        *mut bool,
+    ) -> *mut MongoExtensionStatus,
+    pub evaluate_pipeline_rewrite_rule_transform: unsafe extern "C" fn(
+        *mut MongoExtensionLogicalAggStage,
+        MongoExtensionByteView,
+        *mut MongoExtensionPipelineRewriteContext,
+        *mut bool,
+    ) -> *mut MongoExtensionStatus,
+    pub get_filter: unsafe extern "C" fn(
+        *const MongoExtensionLogicalAggStage,
+        *mut *mut MongoExtensionByteBuf,
+    ) -> *mut MongoExtensionStatus,
+    pub apply_pipeline_suffix_dependencies: unsafe extern "C" fn(
+        *mut MongoExtensionLogicalAggStage,
+        *const MongoExtensionPipelineDependencies,
+    ) -> *mut MongoExtensionStatus,
+    pub get_sort_pattern: unsafe extern "C" fn(
+        *const MongoExtensionLogicalAggStage,
+        *mut *mut MongoExtensionByteBuf,
+    ) -> *mut MongoExtensionStatus,
+    pub skip_stream: unsafe extern "C" fn(
+        *mut MongoExtensionLogicalAggStage,
+        MongoExtensionStreamType,
+    ) -> *mut MongoExtensionStatus,
+    pub get_docs_needed_bounds: unsafe extern "C" fn(
+        *const MongoExtensionLogicalAggStage,
+        *mut *mut MongoExtensionByteBuf,
     ) -> *mut MongoExtensionStatus,
 }
 
@@ -526,6 +583,20 @@ pub struct MongoExtensionHostPortal {
     pub host_mongodb_max_wire_version: i32,
 }
 
+#[repr(u32)]
+#[derive(Clone, Copy)]
+pub enum MongoExtensionPipelineRewriteRuleTags {
+    kPipelineRewriteRuleTagInPlace = 1 << 0,
+    kPipelineRewriteRuleTagReordering = 1 << 1,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MongoExtensionPipelineRewriteRule {
+    pub name: MongoExtensionByteView,
+    pub tags: MongoExtensionPipelineRewriteRuleTags,
+}
+
 #[repr(C)]
 pub struct MongoExtensionHostPortalVTable {
     pub register_stage_descriptor: unsafe extern "C" fn(
@@ -533,6 +604,12 @@ pub struct MongoExtensionHostPortalVTable {
         *const MongoExtensionAggStageDescriptor,
     ) -> *mut MongoExtensionStatus,
     pub get_extension_options: unsafe extern "C" fn(*const MongoExtensionHostPortal) -> MongoExtensionByteView,
+    pub register_stage_rules: unsafe extern "C" fn(
+        *const MongoExtensionHostPortal,
+        MongoExtensionByteView,
+        *const MongoExtensionPipelineRewriteRule,
+        usize,
+    ) -> *mut MongoExtensionStatus,
 }
 
 #[repr(C)]
@@ -564,11 +641,14 @@ pub struct MongoExtensionVTable {
     pub initialize: unsafe extern "C" fn(
         *const MongoExtension,
         *const MongoExtensionHostPortal,
-        *const MongoExtensionHostServices,
     ) -> *mut MongoExtensionStatus,
 }
 
+pub type get_mongodb_extension_versions_t =
+    unsafe extern "C" fn(*mut MongoExtensionAPIVersionVector);
+
 pub type get_mongo_extension_t = unsafe extern "C" fn(
-    *const MongoExtensionAPIVersionVector,
+    MongoExtensionAPIVersion,
+    *const MongoExtensionHostServices,
     *mut *const MongoExtension,
 ) -> *mut MongoExtensionStatus;

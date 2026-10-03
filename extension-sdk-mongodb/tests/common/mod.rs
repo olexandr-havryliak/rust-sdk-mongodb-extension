@@ -7,8 +7,9 @@ use std::mem::ManuallyDrop;
 use extension_sdk_mongodb::status;
 use extension_sdk_mongodb::sys::{
     MongoExtensionAggStageAstNode, MongoExtensionAggStageDescriptor, MongoExtensionAggStageParseNode,
-    MongoExtensionHostPortal, MongoExtensionHostPortalVTable, MongoExtensionHostServices,
-    MongoExtensionHostServicesVTable, MongoExtensionLogger, MongoExtensionStatus,
+    MongoExtensionByteView, MongoExtensionHostPortal, MongoExtensionHostPortalVTable,
+    MongoExtensionHostServices, MongoExtensionHostServicesVTable, MongoExtensionLogger,
+    MongoExtensionPipelineRewriteRule, MongoExtensionStatus,
 };
 use extension_sdk_mongodb::version::EXTENSION_API_VERSION;
 
@@ -27,6 +28,15 @@ pub unsafe extern "C" fn mock_get_extension_options(
         data: OPTS.as_ptr(),
         len: OPTS.len() as u64,
     }
+}
+
+pub unsafe extern "C" fn mock_register_stage_rules(
+    _portal: *const MongoExtensionHostPortal,
+    _stage_name: MongoExtensionByteView,
+    _rules: *const MongoExtensionPipelineRewriteRule,
+    _num_rules: usize,
+) -> *mut MongoExtensionStatus {
+    status::status_ok()
 }
 
 pub unsafe extern "C" fn mock_get_logger() -> *mut MongoExtensionLogger {
@@ -85,6 +95,7 @@ impl MockHost {
         let portal_vt = Box::new(MongoExtensionHostPortalVTable {
             register_stage_descriptor: register,
             get_extension_options: mock_get_extension_options,
+            register_stage_rules: mock_register_stage_rules,
         });
         let portal_vt_raw = Box::into_raw(portal_vt);
 

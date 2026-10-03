@@ -9,6 +9,28 @@ use crate::operation_metrics::SdkOperationMetrics;
 use crate::status;
 use crate::sys::{MongoExtensionOperationMetrics, MongoExtensionQueryExecutionContext, MONGO_EXTENSION_STATUS_OK};
 
+/// Collection metadata captured while binding an extension stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogContext {
+    /// Database name for the aggregation namespace.
+    pub database_name: String,
+    /// Collection name for the aggregation namespace.
+    pub collection_name: String,
+    /// Collection UUID string, when the host provides one.
+    pub uuid: Option<String>,
+    /// Whether binding happened in router context.
+    pub in_router: bool,
+    /// Explain verbosity active during bind.
+    pub verbosity: u32,
+}
+
+impl CatalogContext {
+    /// Namespace in `db.collection` form.
+    pub fn namespace(&self) -> String {
+        format!("{}.{}", self.database_name, self.collection_name)
+    }
+}
+
 /// Context available during stage `open` / `next` / `transform` callbacks.
 ///
 /// During **`get_next`**, the SDK binds the host query execution context and metrics pointer so
@@ -21,6 +43,7 @@ use crate::sys::{MongoExtensionOperationMetrics, MongoExtensionQueryExecutionCon
 pub struct StageContext {
     query_ctx: Option<NonNull<MongoExtensionQueryExecutionContext>>,
     metrics: Option<NonNull<MongoExtensionOperationMetrics>>,
+    catalog: Option<CatalogContext>,
 }
 
 impl StageContext {
@@ -29,7 +52,13 @@ impl StageContext {
         Self {
             query_ctx: None,
             metrics: None,
+            catalog: None,
         }
+    }
+
+    /// Crate-internal: bind catalog metadata captured during AST bind.
+    pub(crate) fn bind_catalog(&mut self, catalog: Option<CatalogContext>) {
+        self.catalog = catalog;
     }
 
     /// Crate-internal: bind host pointers for one `get_next` / generator invocation.
@@ -53,6 +82,11 @@ impl StageContext {
     /// Returns `None` if the host did not provide options or the snapshot was not cached yet.
     pub fn extension_options_raw(&self) -> Option<Vec<u8>> {
         host::extension_options_snapshot()
+    }
+
+    /// Catalog metadata for the collection being aggregated, if the host supplied it.
+    pub fn catalog(&self) -> Option<&CatalogContext> {
+        self.catalog.as_ref()
     }
 
     /// Log at **info** severity (host logger; no-op if services or logger are unavailable).

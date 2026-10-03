@@ -1,6 +1,6 @@
 # HTTP fetch example (`$httpFetch`)
 
-Aggregation extension that implements **`$httpFetch`**: a blocking **HTTP GET** (similar to **`curl`**) for a **`url`** in the stage document. It returns **one document** when the pipeline reaches **EOF with zero upstream rows** (empty collection, **`$limit: 0`**, or an impossible **`$match`**). Runs against **MongoDB 8.3** in Docker.
+Aggregation extension that implements **`$httpFetch`**: a blocking **HTTP GET** (similar to **`curl`**) for a **`url`** in the stage document. It returns **one document** when the pipeline reaches **EOF with zero upstream rows** (empty collection, **`$limit: 0`**, or an impossible **`$match`**). Runs against **MongoDB 9.0** in Docker.
 
 ## What this demo shows
 
@@ -39,7 +39,7 @@ Implementation: [`http-fetch-extension/`](http-fetch-extension/) (`cdylib`, **`u
 ## Requirements
 
 - Docker with Compose v2 (`docker compose`)
-- Network access to pull **`mongo:8.3-rc-noble`** (or override), the Rust builder image, and **outbound HTTPS** from the container (the default demo fetches a public URL)
+- Network access to pull **`mongodb/mongodb-community-server:9.0-ubi9`** (or override), the Rust builder image, and **outbound HTTPS** from the container (the default demo fetches a public URL)
 
 ## Run (from repository root)
 
@@ -49,6 +49,8 @@ chmod +x examples/http-fetch/run-demo.sh
 ```
 
 **`mongod`** is published on host port **27021** when the stack is up.
+
+The container uses the official **`mongodb/mongodb-community-server:9.0-ubi9`** image, reads the extension manifest from **`/etc/mongo/extensions/httpfetch.conf`** via **`--extensionsConfigPath /etc/mongo/extensions`**, and loads the unsigned demo library with signature validation disabled for this local stack.
 
 ### Keep MongoDB running
 
@@ -63,7 +65,7 @@ Usage for **`run-demo.sh`**: **`./examples/http-fetch/run-demo.sh --help`**.
 ### Override the MongoDB image
 
 ```bash
-MONGO_IMAGE=mongo:8.3.0-rc5-noble ./examples/http-fetch/run-demo.sh up
+MONGO_IMAGE=mongodb/mongodb-community-server:9.0-ubi9 ./examples/http-fetch/run-demo.sh up
 ```
 
 ## Manual Compose

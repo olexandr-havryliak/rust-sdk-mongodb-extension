@@ -8,6 +8,24 @@ pub const EXTENSION_API_VERSION: MongoExtensionAPIVersion = MongoExtensionAPIVer
     minor: crate::sys::MONGODB_EXTENSION_API_MINOR_VERSION,
 };
 
+static SUPPORTED_EXTENSION_API_VERSIONS: [MongoExtensionAPIVersion; 1] = [EXTENSION_API_VERSION];
+
+/// Writes the SDK-supported extension API versions for the 1.0 two-phase loader.
+///
+/// The returned pointer references static storage and remains valid for the process lifetime.
+pub unsafe fn write_supported_versions(out: *mut MongoExtensionAPIVersionVector) {
+    if out.is_null() {
+        return;
+    }
+    (*out).len = SUPPORTED_EXTENSION_API_VERSIONS.len() as u64;
+    (*out).versions = SUPPORTED_EXTENSION_API_VERSIONS.as_ptr().cast_mut();
+}
+
+/// Returns true if `selected_version` is one of the API versions this SDK can instantiate.
+pub fn supports_selected_version(selected_version: MongoExtensionAPIVersion) -> bool {
+    selected_version.major == EXTENSION_API_VERSION.major && selected_version.minor == EXTENSION_API_VERSION.minor
+}
+
 /// Returns true if `host_versions` contains a compatible slot for `extension_version`.
 pub fn host_supports_extension(
     host_versions: &MongoExtensionAPIVersionVector,

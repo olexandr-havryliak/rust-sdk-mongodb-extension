@@ -8,6 +8,8 @@ members = [
     "examples/fibonacci/fibonacci-extension",
     "examples/http-fetch/http-fetch-extension",
     "examples/data-federation/data-federation-extension",
+    "examples/opensearch/extension-core",
+    "examples/opensearch/extension",
 ]
 
 [workspace.package]

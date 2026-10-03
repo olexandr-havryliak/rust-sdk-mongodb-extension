@@ -1,0 +1,222 @@
+[
+  {
+    "_id": "p001",
+    "name": "Alpine Trail Pack 32L",
+    "description": "Lightweight hiking backpack with a ventilated back panel, rain cover, trekking pole loops, and hydration sleeve for long mountain day hikes.",
+    "category": "packs",
+    "price": 129.99,
+    "inStock": true,
+    "updatedAt": "2026-10-02T12:00:00Z",
+    "brand": "North Ridge",
+    "internalNotes": "synthetic demo product, not projected to OpenSearch"
+  },
+  {
+    "_id": "p002",
+    "name": "Stormline Shell Jacket",
+    "description": "Waterproof breathable rain shell with taped seams, adjustable hood, and packable construction for wet hiking and commuting.",
+    "category": "outerwear",
+    "price": 189.0,
+    "inStock": true,
+    "updatedAt": "2026-10-02T12:01:00Z",
+    "brand": "Ridgeline Works",
+    "internalNotes": "synthetic demo product, not projected to OpenSearch"
+  },
+  {
+    "_id": "p003",
+    "name": "Summit Down Hoodie",
+    "description": "Compressible insulated down jacket for cold alpine starts, belay breaks, and shoulder-season backpacking.",
+    "category": "outerwear",
+    "price": 249.5,
+    "inStock": false,
+    "updatedAt": "2026-10-02T12:02:00Z",
+    "brand": "North Ridge",
+    "internalNotes": "synthetic demo product, not projected to OpenSearch"
+  },
+  {
+    "_id": "p004",
+    "name": "Granite Approach Shoes",
+    "description": "Sticky rubber approach shoes with a reinforced toe, stable edging platform, and comfortable suede upper for rocky trails.",
+    "category": "footwear",
+    "price": 138.75,
+    "inStock": true,
+    "updatedAt": "2026-10-02T12:03:00Z",
+    "brand": "Stonepath",
+    "internalNotes": "synthetic demo product, not projected to OpenSearch"
+  },
+  {
+    "_id": "p005",
+    "name": "Canyon Trekking Poles",
+    "description": "Adjustable aluminum trekking poles with cork grips, quick locks, and interchangeable baskets for steep hiking routes.",
+    "category": "trekking",
+    "price": 74.25,
+    "inStock": true,
+    "updatedAt": "2026-10-02T12:04:00Z",
+    "brand": "TrailForge",
+    "internalNotes": "synthetic demo product, not projected to OpenSearch"
+  },
+  {
+    "_id": "p006",
+    "name": "Glacier Insulated Bottle",
+    "description": "Vacuum insulated stainless steel bottle that keeps coffee hot on winter trailheads and water cold during summer hikes.",
+    "category": "camp-kitchen",
+    "price": 32.0,
+    "inStock": true,
+    "updatedAt": "2026-10-02T12:05:00Z",
+    "brand": "Campstead",
+    "internalNotes": "synthetic demo product, not projected to OpenSearch"
+  },
+  {
+    "_id": "p007",
+    "name": "Mesa Camp Mug",
+    "description": "Double-wall insulated camp mug with a splash-resistant lid for coffee, tea, and soup around the fire pit.",
+    "category": "camp-kitchen",
+    "price": 18.95,
+    "inStock": true,
+    "updatedAt": "2026-10-02T12:06:00Z",
+    "brand": "Campstead",
+    "internalNotes": "synthetic demo product, not projected to OpenSearch"
+  },
+  {
+    "_id": "p008",
+    "name": "Evergreen Two-Person Tent",
+    "description": "Freestanding backpacking tent with two vestibules, color-coded poles, mesh canopy, and full rainfly for three-season trips.",
+    "category": "shelter",
+    "price": 319.0,
+    "inStock": true,
+    "updatedAt": "2026-10-02T12:07:00Z",
+    "brand": "North Ridge",
+    "internalNotes": "synthetic demo product, not projected to OpenSearch"
+  },
+  {
+    "_id": "p009",
+    "name": "Prairie Sleeping Quilt 20F",
+    "description": "Warm backpacking quilt with draft collar, pad straps, and water-resistant down for lightweight sleep systems.",
+    "category": "sleep",
+    "price": 279.0,
+    "inStock": false,
+    "updatedAt": "2026-10-02T12:08:00Z",
+    "brand": "Ridgeline Works",
+    "internalNotes": "synthetic demo product, not projected to OpenSearch"
+  },
+  {
+    "_id": "p010",
+    "name": "Foam Core Sleeping Pad",
+    "description": "Compact insulated sleeping pad with a quiet stretch fabric top and stable support for side sleepers in cool weather.",
+    "category": "sleep",
+    "price": 119.0,
+    "inStock": true,
+    "updatedAt": "2026-10-02T12:09:00Z",
+    "brand": "Campstead",
+    "internalNotes": "synthetic demo product, not projected to OpenSearch"
+  },
+  {
+    "_id": "p011",
+    "name": "River Dry Duffel 60L",
+    "description": "Waterproof roll-top duffel with welded seams, removable backpack straps, and abrasion-resistant base for paddling trips.",
+    "category": "packs",
+    "price": 164.0,
+    "inStock": true,
+    "updatedAt": "2026-10-02T12:10:00Z",
+    "brand": "Blue Current",
+    "internalNotes": "synthetic demo product, not projected to OpenSearch"
+  },
+  {
+    "_id": "p012",
+    "name": "Forest Merino Base Layer",
+    "description": "Soft merino wool crew top that regulates temperature, resists odor, and layers comfortably under a rain shell.",
+    "category": "apparel",
+    "price": 84.5,
+    "inStock": true,
+    "updatedAt": "2026-10-02T12:11:00Z",
+    "brand": "TrailForge",
+    "internalNotes": "synthetic demo product, not projected to OpenSearch"
+  },
+  {
+    "_id": "p013",
+    "name": "Ridge Softshell Pants",
+    "description": "Stretch hiking pants with wind resistance, articulated knees, and zippered pockets for scrambling and shoulder-season trails.",
+    "category": "apparel",
+    "price": 109.0,
+    "inStock": true,
+    "updatedAt": "2026-10-02T12:12:00Z",
+    "brand": "Ridgeline Works",
+    "internalNotes": "synthetic demo product, not projected to OpenSearch"
+  },
+  {
+    "_id": "p014",
+    "name": "Lumen Headlamp 450",
+    "description": "Rechargeable headlamp with flood and spot beams, red night mode, lockout, and weather-resistant housing.",
+    "category": "lighting",
+    "price": 49.95,
+    "inStock": true,
+    "updatedAt": "2026-10-02T12:13:00Z",
+    "brand": "BrightCamp",
+    "internalNotes": "synthetic demo product, not projected to OpenSearch"
+  },
+  {
+    "_id": "p015",
+    "name": "Summit First Aid Kit",
+    "description": "Compact first aid kit for day hikes with blister care, bandages, gauze, tape, medication packets, and emergency instructions.",
+    "category": "safety",
+    "price": 27.5,
+    "inStock": true,
+    "updatedAt": "2026-10-02T12:14:00Z",
+    "brand": "TrailForge",
+    "internalNotes": "synthetic demo product, not projected to OpenSearch"
+  },
+  {
+    "_id": "p016",
+    "name": "Bear Canister 500",
+    "description": "Hard-sided bear-resistant food canister sized for multi-day backpacking in regulated wilderness areas.",
+    "category": "safety",
+    "price": 86.0,
+    "inStock": false,
+    "updatedAt": "2026-10-02T12:15:00Z",
+    "brand": "WildSafe",
+    "internalNotes": "synthetic demo product, not projected to OpenSearch"
+  },
+  {
+    "_id": "p017",
+    "name": "Vista Compact Binoculars",
+    "description": "Lightweight waterproof binoculars with bright optics for birding, route scouting, and wildlife watching from camp.",
+    "category": "navigation",
+    "price": 156.0,
+    "inStock": true,
+    "updatedAt": "2026-10-02T12:16:00Z",
+    "brand": "VistaField",
+    "internalNotes": "synthetic demo product, not projected to OpenSearch"
+  },
+  {
+    "_id": "p018",
+    "name": "Topo Map Compass",
+    "description": "Baseplate compass with declination adjustment, magnifier, luminous bezel, and map scales for backcountry navigation.",
+    "category": "navigation",
+    "price": 41.0,
+    "inStock": true,
+    "updatedAt": "2026-10-02T12:17:00Z",
+    "brand": "VistaField",
+    "internalNotes": "synthetic demo product, not projected to OpenSearch"
+  },
+  {
+    "_id": "p019",
+    "name": "Trail Repair Multi-Tool",
+    "description": "Pocket multi-tool with pliers, knife, scissors, bit driver, and gear repair essentials for camping and bikepacking.",
+    "category": "tools",
+    "price": 64.0,
+    "inStock": true,
+    "updatedAt": "2026-10-02T12:18:00Z",
+    "brand": "TrailForge",
+    "internalNotes": "synthetic demo product, not projected to OpenSearch"
+  },
+  {
+    "_id": "p020",
+    "name": "Backcountry Cook Set",
+    "description": "Nested lightweight cook pots, folding handle, and strainer lid for two-person backpacking meals.",
+    "category": "camp-kitchen",
+    "price": 58.5,
+    "inStock": true,
+    "updatedAt": "2026-10-02T12:19:00Z",
+    "brand": "Campstead",
+    "internalNotes": "synthetic demo product, not projected to OpenSearch"
+  }
+]

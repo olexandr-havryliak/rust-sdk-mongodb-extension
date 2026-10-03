@@ -1,6 +1,6 @@
-# End-to-end: build Rust extension + run MongoDB 8.3 with extension loaded.
+# End-to-end: build Rust extension + run MongoDB 9.0 with extension loaded.
 # Run from repo root: ./e2e-tests/run-e2e.sh
-# Override image: MONGO_IMAGE=mongo:8.3.0-rc5-noble docker compose -f e2e-tests/docker-compose.yml build
+# Override image: MONGO_IMAGE=mongodb/mongodb-community-server:9.0-ubi9 docker compose -f e2e-tests/docker-compose.yml build
 
 services:
   mongo:
@@ -8,7 +8,7 @@ services:
       context: ..
       dockerfile: e2e-tests/Dockerfile
       args:
-        MONGO_IMAGE: ${MONGO_IMAGE:-mongo:8.3-rc-noble}
+        MONGO_IMAGE: ${MONGO_IMAGE:-mongodb/mongodb-community-server:9.0-ubi9}
     volumes:
       - ./scripts:/scripts:ro
       - ../examples/data-federation/fixtures:/federation-data:ro

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-export MONGO_IMAGE="${MONGO_IMAGE:-mongo:8.3-rc-noble}"
+export MONGO_IMAGE="${MONGO_IMAGE:-mongodb/mongodb-community-server:9.0-ubi9}"
 COMPOSE=(docker compose -f examples/http-fetch/docker-compose.yml --project-name http-fetch-example)
 
 usage() {
@@ -16,7 +16,7 @@ Usage: ./examples/http-fetch/run-demo.sh [COMMAND]
   down | stop     Stop and remove containers (docker compose down -v).
 
 Environment:
-  MONGO_IMAGE     MongoDB base image (default: mongo:8.3-rc-noble)
+  MONGO_IMAGE     MongoDB base image (default: mongodb/mongodb-community-server:9.0-ubi9)
 
 Examples:
   ./examples/http-fetch/run-demo.sh

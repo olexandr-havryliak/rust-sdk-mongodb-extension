@@ -1,6 +1,6 @@
 # Fibonacci example (`$fibonacci`)
 
-Aggregation extension that implements **`$fibonacci: { n: <count> }`**: it streams documents **`{ i, value }`** along the Fibonacci sequence for indices `0 .. n` (with **`n`** capped at 10 000). Runs against **MongoDB 8.3** in Docker.
+Aggregation extension that implements **`$fibonacci: { n: <count> }`**: it streams documents **`{ i, value }`** along the Fibonacci sequence for indices `0 .. n` (with **`n`** capped at 10 000). Runs against **MongoDB 9.0** in Docker.
 
 ## What this demo shows
 
@@ -24,14 +24,14 @@ Emitted documents look like:
 - **Empty collection** (no upstream rows): the stage acts as a **generator** and emits **`n`** rows as above.
 - **Non-empty collection**: the stage **passthrough**s upstream documents unchanged (no Fibonacci merge). Use an empty collection (or a later pipeline) when you want only the generated sequence.
 
-`aggregate: 1` with only **`$fibonacci`** is not accepted on MongoDB 8.3-rc for this stage (“a collection is required”). Prefer an **empty named collection** and **`db.n.aggregate([{ $fibonacci: { n: 10 } }])`**, or follow newer server releases.
+`aggregate: 1` with only **`$fibonacci`** may not be accepted by some server builds for this stage (“a collection is required”). Prefer an **empty named collection** and **`db.n.aggregate([{ $fibonacci: { n: 10 } }])`**.
 
 Implementation: [`fibonacci-extension/`](fibonacci-extension/) (`cdylib`).
 
 ## Requirements
 
 - Docker with Compose v2 (`docker compose`)
-- Network access to pull **`mongo:8.3-rc-noble`** (or your override) and the Rust builder image used in the Dockerfile
+- Network access to pull **`mongodb/mongodb-community-server:9.0-ubi9`** (or your override) and the Rust builder image used in the Dockerfile
 
 ## Run (from repository root)
 
@@ -41,6 +41,8 @@ chmod +x examples/fibonacci/run-demo.sh
 ```
 
 This builds the image, starts MongoDB, runs `scripts/demo.js`, then tears the stack down. **`mongod`** is published on host port **27018** (leaves **`e2e-tests`** on **27017** free).
+
+The container uses the official **`mongodb/mongodb-community-server:9.0-ubi9`** image, reads the extension manifest from **`/etc/mongo/extensions/fibonacci.conf`** via **`--extensionsConfigPath /etc/mongo/extensions`**, and loads the unsigned demo library with signature validation disabled for this local stack.
 
 ### Keep MongoDB running
 
@@ -55,7 +57,7 @@ Usage for **`run-demo.sh`**: **`./examples/fibonacci/run-demo.sh --help`**.
 ### Override the MongoDB image
 
 ```bash
-MONGO_IMAGE=mongo:8.3.0-rc5-noble ./examples/fibonacci/run-demo.sh up
+MONGO_IMAGE=mongodb/mongodb-community-server:9.0-ubi9 ./examples/fibonacci/run-demo.sh up
 ```
 
 ## Manual Compose

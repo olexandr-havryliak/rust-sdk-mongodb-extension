@@ -1,6 +1,8 @@
 # Example extensions
 
-This directory holds **self-contained demos**: each example is a workspace member `cdylib` plus Docker assets and a `run-demo.sh` wrapper. They show how to use the **Rust SDK for MongoDB Extensions** against a real **MongoDB 8.3** image with the Extensions API enabled—not the SDK API reference (see the [repository root README](../README.md)).
+This directory holds **self-contained demos**: each example is a workspace member `cdylib` plus Docker assets and a `run-demo.sh` wrapper. They show how to use the **Rust SDK for MongoDB Extensions** against a real **MongoDB 9.0** image with the Extensions API enabled—not the SDK API reference (see the [repository root README](../README.md)).
+
+All example images default to **`mongodb/mongodb-community-server:9.0-ubi9`**. Their Dockerfiles write extension manifests under **`/etc/mongo/extensions`** and start **`mongod`** with **`featureFlagExtensionsAPI=true`**, **`--extensionsConfigPath /etc/mongo/extensions`**, and **`--loadExtensions ...`**. Because these demo libraries are unsigned local builds, the scripts set **`featureFlagExtensionsApiSignatureValidation=false`** for the demo containers.
 
 Each example’s **README** follows the same section order: summary → what the demo shows → stage shape → behaviour → requirements → run → keep stack running → image overrides → manual Compose → try in `mongosh`.
 
@@ -11,6 +13,7 @@ Each example’s **README** follows the same section order: summary → what the
 | **fibonacci** | `$fibonacci` (source / generator) | **27018** | [fibonacci/README.md](fibonacci/README.md) |
 | **http-fetch** | `$httpFetch` (map + EOF) | **27021** | [http-fetch/README.md](http-fetch/README.md) |
 | **data-federation** | `$readLocalJsonl` (JSONL under `allowedRoot`) | **27022** | [data-federation/README.md](data-federation/README.md) |
+| **opensearch** | `$search` / `$vectorSearch` backed by OpenSearch, with MongoDB -> Kafka -> OpenSearch sync | **27030**, **8083**, **9200**, **5601** | [opensearch/README.md](opensearch/README.md) |
 
 Use a **different host port per stack** so several examples (or `e2e-tests`) can run at once.
 
@@ -33,6 +36,9 @@ db.n.aggregate([{ $httpFetch: { url: "https://example.com/", maxBytes: 65536 } }
 use data_federation_demo;
 db.createCollection("n");
 db.n.aggregate([{ $readLocalJsonl: { path: "sample.ndjson" } }]);
+
+// OpenSearch — full sync + extension query path
+// Run `./examples/opensearch/run-demo.sh test` from the repository root.
 ```
 
 ## Layout (every example)

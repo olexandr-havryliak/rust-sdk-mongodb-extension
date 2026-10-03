@@ -18,17 +18,20 @@ use crate::sys::{
     MongoExtensionAggStageDescriptor, MongoExtensionAggStageDescriptorVTable,
     MongoExtensionAggStageParseNode, MongoExtensionAggStageParseNodeVTable,
     MongoExtensionByteView, MongoExtensionCatalogContext, MongoExtensionDistributedPlanLogic,
+    MongoExtensionClientType,
     MongoExtensionExecAggStage, MongoExtensionExecAggStageVTable,     MongoExtensionExpandedArray,
     MongoExtensionExpandedArrayContainer, MongoExtensionExpandedArrayContainerVTable,
     MongoExtensionExpandedArrayElementUnion,
     MongoExtensionExplainVerbosity, MongoExtensionFirstStageViewApplicationPolicy,
     MongoExtensionGetNextResult, MongoExtensionLogicalAggStage, MongoExtensionLogicalAggStageVTable,
     MongoExtensionOperationMetrics, MongoExtensionOperationMetricsVTable,
-    MongoExtensionQueryExecutionContext, MongoExtensionStatus, MongoExtensionVTable,
+    MongoExtensionPipelineDependencies, MongoExtensionPipelineRewriteContext,
+    MongoExtensionQueryExecutionContext, MongoExtensionStatus, MongoExtensionStreamType,
+    MongoExtensionVTable,
     MongoExtensionViewInfo,     MongoExtensionAggStageNodeType, MongoExtensionByteContainer, MongoExtensionByteContainerType,
     MongoExtensionGetNextResultCode,
 };
-use crate::version::{host_supports_extension, EXTENSION_API_VERSION};
+use crate::version::{supports_selected_version, EXTENSION_API_VERSION};
 
 /// Stage name and parse options shared by generated `get_mongodb_extension`.
 #[derive(Clone, Copy)]
@@ -72,6 +75,12 @@ unsafe extern "C" fn desc_get_name(_: *const MongoExtensionAggStageDescriptor) -
     name_view()
 }
 
+unsafe extern "C" fn desc_get_client_type(
+    _: *const MongoExtensionAggStageDescriptor,
+) -> MongoExtensionClientType {
+    MongoExtensionClientType::kMongoExtensionClientTypeAny
+}
+
 unsafe extern "C" fn desc_parse(
     _: *const MongoExtensionAggStageDescriptor,
     stage_bson: MongoExtensionByteView,
@@ -110,6 +119,7 @@ unsafe extern "C" fn desc_parse(
 
 static DESCRIPTOR_VTABLE: MongoExtensionAggStageDescriptorVTable = MongoExtensionAggStageDescriptorVTable {
     get_name: desc_get_name,
+    get_client_type: desc_get_client_type,
     parse: desc_parse,
 };
 
@@ -197,6 +207,9 @@ unsafe extern "C" fn parse_expand(
                     let c = Box::new(expanded_multi(asts));
                     Ok(Box::into_raw(c).cast::<MongoExtensionExpandedArrayContainer>())
                 }
+                Expansion::WithHostIdLookup { .. } => Err(
+                    "WithHostIdLookup expansion is only supported by source stages".to_string(),
+                ),
             }
         } else {
             let ast = Box::into_raw(Box::new(ast_alloc(args_bytes)))
@@ -536,6 +549,7 @@ unsafe extern "C" fn log_serialize(
 
 unsafe extern "C" fn log_explain(
     p: *const MongoExtensionLogicalAggStage,
+    _ctx: *mut MongoExtensionQueryExecutionContext,
     _v: MongoExtensionExplainVerbosity,
     out: *mut *mut crate::sys::MongoExtensionByteBuf,
 ) -> *mut MongoExtensionStatus {
@@ -570,17 +584,51 @@ unsafe extern "C" fn log_clone(
     status::status_ok()
 }
 
-unsafe extern "C" fn log_vec_score(
-    _: *const MongoExtensionLogicalAggStage,
-    o: *mut bool,
-) -> *mut MongoExtensionStatus {
-    *o = false;
-    status::status_ok()
-}
-
 unsafe extern "C" fn log_vec_limit(
     _: *mut MongoExtensionLogicalAggStage,
     _: *mut i64,
+) -> *mut MongoExtensionStatus {
+    status::status_ok()
+}
+
+unsafe extern "C" fn log_rewrite_precondition(
+    _: *const MongoExtensionLogicalAggStage,
+    _: MongoExtensionByteView,
+    _: *const MongoExtensionPipelineRewriteContext,
+    result: *mut bool,
+) -> *mut MongoExtensionStatus {
+    *result = false;
+    status::status_ok()
+}
+
+unsafe extern "C" fn log_rewrite_transform(
+    _: *mut MongoExtensionLogicalAggStage,
+    _: MongoExtensionByteView,
+    _: *mut MongoExtensionPipelineRewriteContext,
+    result: *mut bool,
+) -> *mut MongoExtensionStatus {
+    *result = false;
+    status::status_ok()
+}
+
+unsafe extern "C" fn log_null_byte_buf(
+    _: *const MongoExtensionLogicalAggStage,
+    out: *mut *mut crate::sys::MongoExtensionByteBuf,
+) -> *mut MongoExtensionStatus {
+    *out = std::ptr::null_mut();
+    status::status_ok()
+}
+
+unsafe extern "C" fn log_apply_suffix_deps(
+    _: *mut MongoExtensionLogicalAggStage,
+    _: *const MongoExtensionPipelineDependencies,
+) -> *mut MongoExtensionStatus {
+    status::status_ok()
+}
+
+unsafe extern "C" fn log_skip_stream(
+    _: *mut MongoExtensionLogicalAggStage,
+    _: MongoExtensionStreamType,
 ) -> *mut MongoExtensionStatus {
     status::status_ok()
 }
@@ -593,8 +641,14 @@ static LOGICAL_VTABLE: MongoExtensionLogicalAggStageVTable = MongoExtensionLogic
     compile: log_compile,
     get_distributed_plan_logic: log_dpl,
     clone: log_clone,
-    is_stage_sorted_by_vector_search_score: log_vec_score,
-    set_vector_search_limit_for_optimization: log_vec_limit,
+    set_vector_search_limit_for_optimization_deprecated: log_vec_limit,
+    evaluate_pipeline_rewrite_rule_precondition: log_rewrite_precondition,
+    evaluate_pipeline_rewrite_rule_transform: log_rewrite_transform,
+    get_filter: log_null_byte_buf,
+    apply_pipeline_suffix_dependencies: log_apply_suffix_deps,
+    get_sort_pattern: log_null_byte_buf,
+    skip_stream: log_skip_stream,
+    get_docs_needed_bounds: log_null_byte_buf,
 };
 
 // --- Exec (passthrough) ---
@@ -736,6 +790,7 @@ unsafe extern "C" fn exec_close(_: *mut MongoExtensionExecAggStage) -> *mut Mong
 
 unsafe extern "C" fn exec_explain(
     _: *const MongoExtensionExecAggStage,
+    _: *mut MongoExtensionQueryExecutionContext,
     _: MongoExtensionExplainVerbosity,
     out: *mut *mut crate::sys::MongoExtensionByteBuf,
 ) -> *mut MongoExtensionStatus {
@@ -777,10 +832,8 @@ static EXTENSION_OBJ_ADDR: OnceLock<usize> = OnceLock::new();
 unsafe extern "C" fn ext_init(
     _: *const MongoExtension,
     portal: *const crate::sys::MongoExtensionHostPortal,
-    services: *const crate::sys::MongoExtensionHostServices,
 ) -> *mut MongoExtensionStatus {
     let r = ffi_boundary(|| -> Result<(), String> {
-        host::set_host_services(services);
         unsafe {
             host::cache_extension_options_from_portal(portal);
         }
@@ -817,16 +870,17 @@ static EXTENSION_VTABLE: MongoExtensionVTable = MongoExtensionVTable {
 /// Shared implementation for the `export_transform_stage!` macro.
 pub unsafe fn get_extension_impl(
     globals: StageGlobals,
-    host_versions: *const crate::sys::MongoExtensionAPIVersionVector,
+    version: crate::sys::MongoExtensionAPIVersion,
+    host_services: *const crate::sys::MongoExtensionHostServices,
     extension_out: *mut *const MongoExtension,
 ) -> *mut MongoExtensionStatus {
-    if host_versions.is_null() || extension_out.is_null() {
+    if host_services.is_null() || extension_out.is_null() {
         return status::new_error_status(-1, "null parameter to get_mongodb_extension");
     }
-    let hv = &*host_versions;
-    if !host_supports_extension(hv, EXTENSION_API_VERSION) {
+    if !supports_selected_version(version) {
         return status::new_error_status(-1, "incompatible extension API version");
     }
+    host::set_host_services(host_services);
     let _ = ACTIVE_STAGE.get_or_init(|| globals);
     let addr = *EXTENSION_OBJ_ADDR.get_or_init(|| {
         let p = Box::into_raw(Box::new(ExtensionObj {

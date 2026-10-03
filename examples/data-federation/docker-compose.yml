@@ -7,7 +7,7 @@ services:
       context: ../..
       dockerfile: examples/data-federation/Dockerfile
       args:
-        MONGO_IMAGE: ${MONGO_IMAGE:-mongo:8.3-rc-noble}
+        MONGO_IMAGE: ${MONGO_IMAGE:-mongodb/mongodb-community-server:9.0-ubi9}
     ports:
       - "27022:27017"
     volumes:

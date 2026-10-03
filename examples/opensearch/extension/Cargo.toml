@@ -1,0 +1,17 @@
+[package]
+name = "opensearch_extension"
+version.workspace = true
+edition.workspace = true
+description = "MongoDB $search and $vectorSearch replacement PoC backed by OpenSearch"
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bson = "2.15"
+extension-sdk-mongodb = { path = "../../../extension-sdk-mongodb" }
+opensearch_extension_core = { path = "../extension-core" }
+
+[lints.rust]
+unsafe_code = "allow"

@@ -2,7 +2,7 @@
 //! Prefer **[`crate::stage_model::StagePlan`]** when you want planner fields together with execution model and lifecycle.
 //!
 //! Field names and string values follow
-//! [`extension_agg_stage_static_properties.idl`](https://github.com/mongodb/mongo/blob/v8.3/src/mongo/db/extension/public/extension_agg_stage_static_properties.idl)
+//! [`extension_agg_stage_static_properties.idl`](https://github.com/mongodb/mongo/blob/v9.0/src/mongo/db/extension/public/extension_agg_stage_static_properties.idl)
 //! (`MongoExtensionStaticProperties`). This SDK surface intentionally models the **core planner
 //! contract** (`streamType`, `position`, `requiresInputDocSource`); other IDL fields rely on the
 //! host’s defaults when absent from the returned document.

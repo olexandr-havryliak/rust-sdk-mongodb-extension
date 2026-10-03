@@ -55,7 +55,7 @@ The Docker images in this repo set **`allowedRoot: /federation-data`** in the ex
 ## Requirements
 
 - Docker with Compose v2 (`docker compose`)
-- Network access to pull **`mongo:8.3-rc-noble`** (or your override) and the Rust builder image
+- Network access to pull **`mongodb/mongodb-community-server:9.0-ubi9`** (or your override) and the Rust builder image
 
 ## Run (from repository root)
 
@@ -65,6 +65,8 @@ chmod +x examples/data-federation/run-demo.sh
 ```
 
 **`mongod`** listens on host port **27022** while the stack is up.
+
+The container uses the official **`mongodb/mongodb-community-server:9.0-ubi9`** image, reads the extension manifest from **`/etc/mongo/extensions/datafederation.conf`** via **`--extensionsConfigPath /etc/mongo/extensions`**, and loads the unsigned demo library with signature validation disabled for this local stack.
 
 ### Keep MongoDB running
 
@@ -77,7 +79,7 @@ mongosh --port 27022
 ### Override the MongoDB image
 
 ```bash
-MONGO_IMAGE=mongo:8.3.0-rc5-noble ./examples/data-federation/run-demo.sh up
+MONGO_IMAGE=mongodb/mongodb-community-server:9.0-ubi9 ./examples/data-federation/run-demo.sh up
 ```
 
 ## Manual Compose
@@ -102,7 +104,7 @@ db.n.aggregate([
 ]);
 ```
 
-**Same pattern for `events.jsonl`** (empty collection **`n`**; on MongoDB **8.3-rc**, **`{ aggregate: 1, … }`** without a collection is rejected for this stage — use **`db.<coll>.aggregate`** instead):
+**Same pattern for `events.jsonl`** (empty collection **`n`**; if **`{ aggregate: 1, … }`** without a collection is rejected for this stage, use **`db.<coll>.aggregate`** instead):
 
 ```javascript
 use data_federation_demo;

@@ -58,8 +58,8 @@ typedef struct {
     uint32_t minor;
 } MongoExtensionAPIVersion;
 
-#define MONGODB_EXTENSION_API_MAJOR_VERSION 0
-#define MONGODB_EXTENSION_API_MINOR_VERSION 1
+#define MONGODB_EXTENSION_API_MAJOR_VERSION 1
+#define MONGODB_EXTENSION_API_MINOR_VERSION 0
 
 // The current API version of the MongoDB extension.
 #define MONGODB_EXTENSION_API_VERSION                                            \
@@ -462,6 +462,14 @@ typedef enum MongoExtensionAggStageNodeType : uint32_t {
 } MongoExtensionAggStageNodeType;
 
 /**
+ * Type of client that may specify an extension stage.
+ */
+typedef enum MongoExtensionClientType : uint32_t {
+    kMongoExtensionClientTypeAny = 0,
+    kMongoExtensionClientTypeInternal = 1
+} MongoExtensionClientType;
+
+/**
  * An AggStageDescriptor describes features of a stage that are not bound to the stage
  * definition. This object functions as a factory to create logical stage through parsing.
  *
@@ -479,6 +487,11 @@ typedef struct MongoExtensionAggStageDescriptorVTable {
      * Returns a MongoExtensionByteView containing the name of this aggregation stage.
      */
     MongoExtensionByteView (*get_name)(const MongoExtensionAggStageDescriptor* descriptor);
+
+    /**
+     * Returns the type of client permitted to specify this stage.
+     */
+    MongoExtensionClientType (*get_client_type)(const MongoExtensionAggStageDescriptor* descriptor);
 
     /**
      * Parse the user provided stage definition into a parse node.
@@ -705,6 +718,19 @@ typedef struct MongoExtensionLogicalAggStage {
     const struct MongoExtensionLogicalAggStageVTable* const vtable;
 } MongoExtensionLogicalAggStage;
 
+// Forward declare.
+struct MongoExtensionQueryExecutionContext;
+struct MongoExtensionPipelineRewriteContext;
+struct MongoExtensionPipelineDependencies;
+
+/**
+ * Identifies which stream a multi-stream extension source document belongs to.
+ */
+typedef enum MongoExtensionStreamType : uint8_t {
+    kMongoExtensionStreamTypeDocResult = 0,
+    kMongoExtensionStreamTypeMetaResult = 1
+} MongoExtensionStreamType;
+
 /**
  * Virtual function table for MongoExtensionLogicalAggStage.
  */
@@ -735,6 +761,7 @@ typedef struct MongoExtensionLogicalAggStageVTable {
      * the query plan portion of explain.
      */
     MongoExtensionStatus* (*explain)(const MongoExtensionLogicalAggStage* logicalStage,
+                                     struct MongoExtensionQueryExecutionContext* execCtx,
                                      MongoExtensionExplainVerbosity verbosity,
                                      MongoExtensionByteBuf** output);
 
@@ -764,18 +791,41 @@ typedef struct MongoExtensionLogicalAggStageVTable {
                                    MongoExtensionLogicalAggStage** output);
 
     /**
-     * Populates outIsSortedByVectorSearchScore with true if the extension stage sorts by vector
-     * search score, false otherwise. Intended to be used by the extension $vectorSearch stage.
-     */
-    MongoExtensionStatus* (*is_stage_sorted_by_vector_search_score)(
-        const MongoExtensionLogicalAggStage* logicalStage, bool* outIsSortedByVectorSearchScore);
-
-    /**
      * Populates extractedLimitVal with the extracted limit value for the $vectorSearch extension
      * stage to use in its optimizations.
+     *
+     * This method is deprecated and will be removed in a future API version.
      */
-    MongoExtensionStatus* (*set_vector_search_limit_for_optimization)(
+    MongoExtensionStatus* (*set_vector_search_limit_for_optimization_deprecated)(
         MongoExtensionLogicalAggStage* logicalStage, long long* extractedLimitVal);
+
+    MongoExtensionStatus* (*evaluate_pipeline_rewrite_rule_precondition)(
+        const MongoExtensionLogicalAggStage* logicalStage,
+        MongoExtensionByteView ruleName,
+        const struct MongoExtensionPipelineRewriteContext* ctx,
+        bool* result);
+
+    MongoExtensionStatus* (*evaluate_pipeline_rewrite_rule_transform)(
+        MongoExtensionLogicalAggStage* logicalStage,
+        MongoExtensionByteView ruleName,
+        struct MongoExtensionPipelineRewriteContext* ctx,
+        bool* result);
+
+    MongoExtensionStatus* (*get_filter)(const MongoExtensionLogicalAggStage* logicalStage,
+                                        MongoExtensionByteBuf** output);
+
+    MongoExtensionStatus* (*apply_pipeline_suffix_dependencies)(
+        MongoExtensionLogicalAggStage* logicalStage,
+        const struct MongoExtensionPipelineDependencies* deps);
+
+    MongoExtensionStatus* (*get_sort_pattern)(const MongoExtensionLogicalAggStage* logicalStage,
+                                              MongoExtensionByteBuf** sortPattern);
+
+    MongoExtensionStatus* (*skip_stream)(MongoExtensionLogicalAggStage* logicalStage,
+                                         MongoExtensionStreamType streamType);
+
+    MongoExtensionStatus* (*get_docs_needed_bounds)(
+        const MongoExtensionLogicalAggStage* logicalStage, MongoExtensionByteBuf** output);
 
 } MongoExtensionLogicalAggStageVTable;
 
@@ -900,6 +950,7 @@ typedef struct MongoExtensionExecAggStageVTable {
      * populate the execution metrics portion of the explain output.
      */
     MongoExtensionStatus* (*explain)(const MongoExtensionExecAggStage* execAggStage,
+                                     MongoExtensionQueryExecutionContext* execCtx,
                                      MongoExtensionExplainVerbosity verbosity,
                                      MongoExtensionByteBuf** output);
 } MongoExtensionExecAggStageVTable;
@@ -1123,8 +1174,8 @@ typedef struct MongoExtensionIdleThreadBlockVTable {
  * the API version and an initialization function.
  *
  * At extension loading time, the MongoDB server will check compatibility of the extension's API
- * version with the server's API version then invoke the initializer. We also provide a pointer to
- * the host services for the extension to invoke provided host functionality at any point.
+ * version with the server's API version then invoke the initializer. The host services are provided
+ * by get_mongodb_extension for the extension to invoke host functionality at any point.
  *
  * The host _portal_ pointer is only valid during initialization and should not be retained by the
  * extension. The host _services_ pointer, on the other hand, is valid for the lifetime of the
@@ -1157,6 +1208,22 @@ typedef struct MongoExtensionHostPortal {
 } MongoExtensionHostPortal;
 
 /**
+ * Tags that control when and how a pipeline rewrite rule is evaluated.
+ */
+typedef enum MongoExtensionPipelineRewriteRuleTags : uint32_t {
+    kPipelineRewriteRuleTagInPlace = 1 << 0,
+    kPipelineRewriteRuleTagReordering = 1 << 1
+} MongoExtensionPipelineRewriteRuleTags;
+
+/**
+ * A pipeline optimization rule provided by an extension.
+ */
+typedef struct MongoExtensionPipelineRewriteRule {
+    MongoExtensionByteView name;
+    MongoExtensionPipelineRewriteRuleTags tags;
+} MongoExtensionPipelineRewriteRule;
+
+/**
  * Virtual function table for MongoExtensionHostPortal.
  */
 typedef struct MongoExtensionHostPortalVTable {
@@ -1172,6 +1239,14 @@ typedef struct MongoExtensionHostPortalVTable {
      * extension.
      */
     MongoExtensionByteView (*get_extension_options)(const MongoExtensionHostPortal* portal);
+
+    /**
+     * Register pipeline optimization rules for a named extension stage.
+     */
+    MongoExtensionStatus* (*register_stage_rules)(const MongoExtensionHostPortal* hostPortal,
+                                                  MongoExtensionByteView stageName,
+                                                  const MongoExtensionPipelineRewriteRule* rules,
+                                                  size_t numRules);
 } MongoExtensionHostPortalVTable;
 
 /**
@@ -1246,31 +1321,34 @@ typedef struct MongoExtensionVTable {
      * extension to avoid a dangling pointer.
      */
     MongoExtensionStatus* (*initialize)(const MongoExtension* extension,
-                                        const MongoExtensionHostPortal* portal,
-                                        const MongoExtensionHostServices* services);
+                                        const MongoExtensionHostPortal* portal);
 } MongoExtensionVTable;
+
+/**
+ * The symbol that must be defined in all extension shared libraries so the MongoDB server can query
+ * the extension's supported API versions before selecting a compatible version.
+ */
+#define GET_MONGODB_EXTENSION_VERSIONS_SYMBOL "get_mongodb_extension_versions"
+typedef void (*get_mongodb_extension_versions_t)(
+    MongoExtensionAPIVersionVector* extensionVersions);
 
 /**
  * The symbol that must be defined in all extension shared libraries to register the extension with
  * the MongoDB server when the extension is loaded. Returns a MongoExtensionStatus indicating
- * whether or not the parameter MongoExtension was successfully initialized. Also takes a struct
- * representing the API version requirements to comply with the host.
+ * whether or not the parameter MongoExtension was successfully initialized. Also takes the API
+ * version selected by the host.
  *
  * NOTE: You must define this symbol in your extension shared library and avoid name mangling (for
  * example, with 'extern "C"') so that the MongoDB server can find it at loadtime.
  *
  * IMPORTANT: We require that extensions throw exceptions using the HostServices' user_asserted()
  * and tripwire_asserted() functions instead of throwing C++ exceptions across the API boundary.
- * However, the HostServices is only initialized after this function is called (during the call
- * to MongoExtension::initialize). Attempting to use HostServices in the body of
- * get_mongodb_extension would result in a crash. Therefore, if your extension needs to report
- * errors during get_mongodb_extension, you must build a "hand-crafted" MongoExtensionStatus object
- * and return it directly from this function.
- * TODO SERVER-115700: Fix this design limitation.
  */
 #define GET_MONGODB_EXTENSION_SYMBOL "get_mongodb_extension"
 typedef MongoExtensionStatus* (*get_mongo_extension_t)(
-    const MongoExtensionAPIVersionVector* hostVersions, const MongoExtension** extension);
+    MongoExtensionAPIVersion version,
+    const MongoExtensionHostServices* hostServices,
+    const MongoExtension** extension);
 
 #ifdef __cplusplus
 }  // extern "C"
