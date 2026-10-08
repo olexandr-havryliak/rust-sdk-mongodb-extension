@@ -7,37 +7,12 @@ function printSection(title, cursor) {
   cursor.forEach((doc) => {
     printjson({
       _id: doc._id,
-      name: doc.name,
-      category: doc.category,
-      price: doc.price,
-      inStock: doc.inStock,
+      title: doc.title,
+      description: doc.description,
       score: doc.score,
     });
   });
 }
-
-printSection(
-  "Text search: waterproof hiking shell",
-  products.aggregate([
-    {
-      $search: {
-        path: "description",
-        query: "waterproof hiking shell",
-        limit: 5,
-      },
-    },
-    {
-      $project: {
-        _id: 1,
-        name: 1,
-        category: 1,
-        price: 1,
-        inStock: 1,
-        score: { $meta: "searchScore" },
-      },
-    },
-  ])
-);
 
 printSection(
   "Vector search: warm sleep system for cold backpacking",
@@ -52,10 +27,8 @@ printSection(
     {
       $project: {
         _id: 1,
-        name: 1,
-        category: 1,
-        price: 1,
-        inStock: 1,
+        title: 1,
+        description: 1,
         score: { $meta: "vectorSearchScore" },
       },
     },

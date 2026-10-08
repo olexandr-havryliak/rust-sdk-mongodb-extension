@@ -5,9 +5,7 @@
     {
       $set: {
         description: "Insulated winter expedition parka with a warm hood for freezing weather and snowy mountain camps.",
-        price: 179,
-        inStock: false,
-        updatedAt: "2026-10-03T10:05:00Z",
+        title: "Demo Winter Expedition Parka",
       },
     }
   );

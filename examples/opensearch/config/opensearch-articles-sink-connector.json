@@ -1,0 +1,23 @@
+{
+  "connector.class": "io.aiven.kafka.connect.opensearch.OpensearchSinkConnector",
+  "tasks.max": "1",
+  "topics": "mongodb.catalog.articles",
+  "connection.url": "http://opensearch:9200",
+  "key.ignore": "false",
+  "schema.ignore": "true",
+  "index.write.method": "insert",
+  "behavior.on.null.values": "delete",
+  "behavior.on.version.conflict": "ignore",
+  "max.in.flight.requests": "1",
+  "batch.size": "1",
+  "errors.tolerance": "none",
+  "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "key.converter.schemas.enable": "false",
+  "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "value.converter.schemas.enable": "false",
+  "transforms": "key,fields",
+  "transforms.key.type": "org.apache.kafka.connect.transforms.ExtractField$Key",
+  "transforms.key.field": "_id",
+  "transforms.fields.type": "org.apache.kafka.connect.transforms.ReplaceField$Value",
+  "transforms.fields.include": "description"
+}

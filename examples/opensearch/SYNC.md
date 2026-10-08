@@ -1,88 +1,88 @@
 # MongoDB-to-OpenSearch Synchronization
 
-See [README.md](README.md) for Docker demo commands,
-[ARCHITECTURE.md](ARCHITECTURE.md) for mappings and embedding pipelines, and
-[INDEXER.md](INDEXER.md) for consumer operation, ordering, failover, and recovery.
+[README.md](README.md) contains runnable commands. See [ARCHITECTURE.md](ARCHITECTURE.md)
+for mappings/model defaults and [CONNECTOR.md](CONNECTOR.md) for delivery limits.
+See [CONNECTOR-LIFECYCLE.md](CONNECTOR-LIFECYCLE.md) for on-the-fly namespace and
+connector management, including expected OpenSearch index retention on deletion.
 
-## Source Connector Configuration
+## Source Connector
 
-[Dockerfile.connect](Dockerfile.connect) installs the MongoDB Source Connector
-into the Kafka Connect image during build. The registration service runs
-[scripts/register-source-connector.sh](scripts/register-source-connector.sh),
-which configures `mongo-products-source` from
-[config/mongo-source-connector.json](config/mongo-source-connector.json).
+[mongo-source-connector.json](config/mongo-source-connector.json) configures
+`com.mongodb.kafka.connect.MongoSourceConnector` with one task:
+
+- `startup.mode=copy_existing` copies existing documents and then follows change streams.
+- `database=search_demo`, `collection=products` select the demo namespace.
+- `topic.namespace.map` routes it to `mongodb.search_demo.products`.
+- `publish.full.document.only=true` publishes complete documents rather than update patches.
+- `change.stream.document.key.as.key=true` preserves the document key for inserts and deletes.
+- `publish.full.document.only.tombstone.on.delete=true` emits keyed null values for deletes.
+
+Source keys/values are serialized as JSON strings with `SimplifiedJson`. The sink
+uses schemaless JSON converters to decode them into Kafka Connect maps. No
+additional custom transformer or consumer is installed.
+
+## Sink and Field Selection
+
+[opensearch-sink-connector.json](config/opensearch-sink-connector.json) selects
+the topic and configures two standard Kafka SMTs:
 
 ```json
 {
-  "tasks.max": "1",
-  "startup.mode": "copy_existing",
-  "publish.full.document.only": "true",
-  "publish.full.document.only.tombstone.on.delete": "true",
-  "change.stream.document.key.as.key": "true"
+  "transforms": "key,fields",
+  "transforms.key.type": "org.apache.kafka.connect.transforms.ExtractField$Key",
+  "transforms.key.field": "_id",
+  "transforms.fields.type": "org.apache.kafka.connect.transforms.ReplaceField$Value",
+  "transforms.fields.include": "description"
 }
 ```
 
-The connector copies existing documents and captures MongoDB change streams.
-It publishes full JSON documents, not update patches, to `search_demo.products`.
-The MongoDB document key is the Kafka record key. Deletes have a null value.
-[docker-compose.yml](docker-compose.yml) explicitly creates this topic with one
-partition before registering the source connector. The current single broker
-uses replication factor 1; this is not a replicated Kafka deployment.
+`ExtractField` makes the string MongoDB `_id` the OpenSearch document ID.
+`ReplaceField` selects only fields to vectorize and preserves null-valued delete
+records. Projection happens in the Kafka sink before OpenSearch receives a
+document; Kafka still retains the full source payload. This is not field
+redaction from Kafka storage.
 
-## Indexing Configuration
+Both demo namespaces use `_id`, `title`, and `description`. Only description is
+projected; title stays in MongoDB and is returned through the host ID lookup.
 
-[indexer/indexer.py](indexer/indexer.py) reads
-[config/indexing.yml](config/indexing.yml). This configuration controls field
-projection and automatically generated OpenSearch mappings:
+To select another flat text field, change `transforms.fields.include`, then
+re-register the connector configuration:
 
-```yaml
-namespaces:
-  search_demo.products:
-    index: search_demo.products
-    vector:
-      dimension: 384
-      modelId: "${OPENSEARCH_MODEL_ID:-}"
-    fields:
-      description:
-        sourcePath: description
-        tags: [search, vectorSearch]
-      category:
-        sourcePath: category
-        tags: [filter]
-        type: keyword
+```bash
+docker compose -f examples/opensearch/docker-compose.yml --project-name opensearch-example run --rm --no-deps connect-setup
 ```
 
-`search` selects text mappings; `vectorSearch` additionally creates an embedding
-field. Scalar fields use their declared type. An empty model ID is resolved from
-the shared model-ID file written by model setup. Source text remains in the
-projected document alongside generated vectors. Unconfigured fields are omitted.
+No per-field mapping/pipeline change is needed. New or updated documents get
+`<field>_embedding`. Changing projection does not reindex old documents already
+consumed: perform a coordinated full rebuild for a consistent catalog. Numeric,
+boolean, object, array, null, and blank values are not vectorized; selecting them
+causes a write failure. There are no field tags or text-search fields.
 
-The indexer, rather than Kafka Connect, creates mappings and pipelines and writes
-OpenSearch documents. This active-standby implementation supports exactly one
-namespace/topic with partition 0. Index names should match MongoDB namespaces.
-Reserved `_sync_*`, `_mongo_*`, and `_id` output fields cannot be configured.
-
-## Consumer and HA/FT
-
-Workers share a consumer group. With one partition, one worker processes records
-and other members wait for takeover. Auto-commit is disabled; successful
-OpenSearch writes precede explicit Kafka commits. Kafka offsets provide external
-document versions, and persistent OpenSearch tombstones prevent delayed writes
-from resurrecting deleted documents.
-
-The complete processing contract, UUID/configuration checks, async rebalance,
-retention requirements, and migration procedure are in [INDEXER.md](INDEXER.md).
-Replicating indexer processes does not make the single-node demo's MongoDB,
-Kafka, or OpenSearch infrastructure highly available.
+For a new namespace, configure the source namespace/topic route and sink topic
+as `mongodb.db.collection`, and provision a one-partition Kafka topic. The index
+uses the shared template automatically and has the topic name. Prefer a fresh
+source/sink pair per namespace to isolate initial copy and projection settings.
+The complete commands and optional articles configurations are in
+[CONNECTOR-LIFECYCLE.md](CONNECTOR-LIFECYCLE.md). All documents with the same ID
+must stay in one ordered partition; this demo deliberately does not scale
+partitions or tasks.
 
 ## Test Coverage
 
-[indexer/test_indexer.py](indexer/test_indexer.py) covers UUID/topology validation,
-bootstrap races, version conflicts, malformed records, write/commit ordering,
-checkpoint validation, async assignment, revocation, and shutdown.
-[tests/test_sync.py](tests/test_sync.py) checks initial copy, insert, replace,
-update, tombstones, embeddings, full MongoDB lookup, and both score types.
-[tests/run-failover.sh](tests/run-failover.sh) starts two workers, forcibly stops
-the active, waits for standby takeover, checks document updates, rejects a stale
-write after deletion, and checks re-insertion. Commands are in
-[INDEXER.md#verification](INDEXER.md#verification).
+- Configuration unit tests: Kafka projection/key extraction, delete mode,
+  replacement mode, scoped template, vector dimensions, and task/request limits.
+- Seed regression test: repeated loading preserves non-dataset documents and
+  does not drop the collection or duplicate seed IDs.
+- Real-model pipeline tests: arbitrary fields, distinct vectors, consistent
+  field association, text removal, empty projection, and invalid input rejection.
+- Synchronization tests: initial copy, insert/update/replace/delete, removed
+  embeddings, same-ID reinsert, default query model, full MongoDB document/score,
+  stale-version rejection, and deliberate same-offset replay.
+- Worker recovery test: forced Connect stop, MongoDB writes/deletes during the
+  outage, and resumed propagation without a custom consumer.
+- Connector lifecycle tests: dynamic initial copy/live inserts, source/sink
+  configuration updates, description-only projection, MongoDB documents/scores,
+  and retained index/documents with no propagation after connector deletion.
+
+These tests do not certify multi-node HA, indefinite stale-write safety after
+physical deletes, or topic recreation. See [CONNECTOR.md](CONNECTOR.md).

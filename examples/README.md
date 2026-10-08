@@ -13,7 +13,7 @@ Each example’s **README** follows the same section order: summary → what the
 | **fibonacci** | `$fibonacci` (source / generator) | **27018** | [fibonacci/README.md](fibonacci/README.md) |
 | **http-fetch** | `$httpFetch` (map + EOF) | **27021** | [http-fetch/README.md](http-fetch/README.md) |
 | **data-federation** | `$readLocalJsonl` (JSONL under `allowedRoot`) | **27022** | [data-federation/README.md](data-federation/README.md) |
-| **opensearch** | `$search` / `$vectorSearch` backed by OpenSearch, with MongoDB -> Kafka -> OpenSearch sync | **27030**, **8083**, **9200**, **5601** | [opensearch/README.md](opensearch/README.md) |
+| **opensearch** | `$vectorSearch` backed by OpenSearch, with MongoDB -> Kafka -> OpenSearch connectors | **27030**, **8083**, **9200**, **5601** | [opensearch/README.md](opensearch/README.md) |
 
 Use a **different host port per stack** so several examples (or `e2e-tests`) can run at once.
 

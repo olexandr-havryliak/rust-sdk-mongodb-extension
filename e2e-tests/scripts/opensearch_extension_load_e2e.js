@@ -25,14 +25,6 @@ function assertStageLoaded(stage) {
 }
 
 assertStageLoaded({
-  $search: {
-    path: "description",
-    query: "waterproof shell",
-    limit: 1,
-  },
-});
-
-assertStageLoaded({
   $vectorSearch: {
     path: "description",
     query: "waterproof shell",
