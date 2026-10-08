@@ -67,6 +67,10 @@ class SyncTests(unittest.TestCase):
             self.assertEqual(len(vector), 384)
             self.assertTrue(all(isinstance(x, (int, float)) and math.isfinite(x) for x in vector))
 
+    def test_wiredtiger_cache_is_minimal(self):
+        cache = self.mongo.admin.command("serverStatus")["wiredTiger"]["cache"]
+        self.assertEqual(cache["maximum bytes configured"], 256 * 1024 * 1024)
+
     def test_initial_copy_and_global_mapping(self):
         wait_until("all seed documents", lambda: all(os_doc(f"p{i:03}") for i in range(1, 21)))
         self.assert_vectors(os_doc("p001")["_source"])

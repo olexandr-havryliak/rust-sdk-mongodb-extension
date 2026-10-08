@@ -4,8 +4,9 @@
 //! Field names and string values follow
 //! [`extension_agg_stage_static_properties.idl`](https://github.com/mongodb/mongo/blob/v9.0/src/mongo/db/extension/public/extension_agg_stage_static_properties.idl)
 //! (`MongoExtensionStaticProperties`). This SDK surface intentionally models the **core planner
-//! contract** (`streamType`, `position`, `requiresInputDocSource`); other IDL fields rely on the
-//! host’s defaults when absent from the returned document.
+//! contract** (`streamType`, `position`, `requiresInputDocSource`), with optional router placement
+//! through [`StageProperties::to_document_with_host_type`]. Other IDL fields rely on the host's
+//! defaults when absent from the returned document.
 
 use bson::doc;
 use bson::Document;
@@ -47,6 +48,16 @@ impl StagePosition {
             StagePosition::Last => "last",
         }
     }
+}
+
+/// Host placement for an extension stage in a sharded pipeline.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HostTypeRequirement {
+    /// Preserve the host's default placement and the existing BSON contract.
+    #[default]
+    None,
+    /// Execute on the router (`mongos`), not on a data shard.
+    Router,
 }
 
 /// Planner-facing static properties for an aggregation stage extension (core contract).
@@ -92,6 +103,15 @@ impl StageProperties {
             "requiresInputDocSource": self.requires_input,
         }
     }
+
+    /// Adds an explicit placement constraint without changing the core properties.
+    pub fn to_document_with_host_type(self, host_type: HostTypeRequirement) -> Document {
+        let mut document = self.to_document();
+        if host_type == HostTypeRequirement::Router {
+            document.insert("hostType", "router");
+        }
+        document
+    }
 }
 
 impl Default for StageProperties {
@@ -109,6 +129,20 @@ pub fn default_map_stage_static_properties() -> Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn router_placement_serializes_without_changing_core_properties() {
+        let properties = StageProperties::source_stage_default();
+        let mut expected = properties.to_document();
+        expected.insert("hostType", "router");
+        assert_eq!(properties.to_document_with_host_type(HostTypeRequirement::Router), expected);
+    }
+
+    #[test]
+    fn unspecified_placement_preserves_existing_bson_contract() {
+        let properties = StageProperties::source_stage_default();
+        assert_eq!(properties.to_document_with_host_type(HostTypeRequirement::None), properties.to_document());
+    }
 
     #[test]
     fn default_properties_three_fields_and_idl_strings() {

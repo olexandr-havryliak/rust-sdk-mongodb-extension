@@ -4,6 +4,11 @@ Rust workspace that ships **`extension-sdk-mongodb`**, the **Rust SDK for MongoD
 
 The same repository also contains **sample extensions** and a **test harness**; those are documented separately so this file stays focused on the SDK crates.
 
+The [OpenSearch mongos example](examples/opensearch-mongos/README.md) runs a
+router-only `$vectorSearch` extension with standard Kafka synchronization and
+full document keys on a two-shard cluster. It is separate from the
+[replica-set example](examples/opensearch/README.md).
+
 **MongoDB Extensions ABI:** this tree targets the vendored C API **version 1.0** (`MONGODB_EXTENSION_API_MAJOR_VERSION` **1**, `MONGODB_EXTENSION_API_MINOR_VERSION` **0** in [`include/mongodb_extension_api.h`](include/mongodb_extension_api.h)). Extensions built with the SDK export `get_mongodb_extension_versions` to advertise that pair, then accept the host-selected version in `get_mongodb_extension` (see [`extension-sdk-mongodb/src/version.rs`](extension-sdk-mongodb/src/version.rs)).
 
 ## Crates
@@ -25,14 +30,14 @@ At a high level, the lifecycle looks like this:
 2. **Extension initialize** (optional) — If you use hooks such as **`on_init`** on a map transform, the host may call your extension **initialize** while a host **portal** is valid (e.g. to read extension manifest bytes once).
 3. **Parse** — For each stage instance in a pipeline, the host supplies the **full stage BSON** (a single document whose sole top-level key is your stage name). The SDK decodes it, validates the key and inner argument object, and builds whatever parse node the host ABI expects.
 4. **Open / bind** — When execution starts, **source** stages run **`open`**: arguments → owned **`State`**. **Transform** stages typically hold parsed args and wait for the first upstream row; the host wires your stage after an upstream executable stage when the pipeline requires it.
-5. **Run (`get_next`)** — The host drives the cursor by calling **`get_next`** repeatedly. **Transforms** pull one advanced row from upstream (when present), apply **`transform`**, and return one output row or an error. **Sources** run **`next`** until you return **`Next::Advanced`** or **`Next::Eof`**. When a **source** stage is **not** the first executable stage, the bundled source implementation **forwards** **`get_next`** to the upstream stage (passthrough); the generator path applies when there is **no** upstream executable stage.
+5. **Run (`get_next`)** — The host drives the cursor by calling **`get_next`** repeatedly. **Transforms** pull one advanced row from upstream (when present), apply **`transform`**, and return one output row or an error. **Sources** declaring **`requiresInputDocSource: false`** always run their own **`next`**, even when the host attaches an upstream stage. Input-requiring sources retain passthrough for nonempty upstream input and generator fallback when there is no input.
 6. **Teardown** — Cursor completion or failure leads the host to drop execution objects; the SDK drops your **`State`** through the **`drop_state`** hook for source stages.
 
 ## Kinds of stages (what to implement)
 
 - **Passthrough** — No per-document logic. **`export_transform_stage!`** only forwards documents and optionally enforces an empty inner document (`expect_empty`).
 - **Transform (map)** — There **is** an upstream stream. For each **advanced** upstream document, you emit **one** output document. **`export_map_transform_stage!`** uses plain functions; **`TransformStage`** + **`export_transform_stage_type!`** gives typed **`parse`** + **`transform`** with **`StageContext`**. You may optionally supply **`on_eof`** when upstream ends **before** any row (empty collection) to synthesize a single row from arguments alone, and **`on_init`** for extension-level setup.
-- **Source (generator)** — There is **no** upstream executable stage in front of you (e.g. **`aggregate: 1`**, or your stage is the only executable stage). You implement **`SourceStage`**: **`parse`**, **`open`**, **`next`**. If the pipeline later places another stage upstream of yours, the SDK’s source wrapper **delegates** **`get_next`** to that upstream stage instead of calling your **`next`**.
+- **Source (generator)** — You implement **`SourceStage`**: **`parse`**, **`open`**, **`next`**. Set **`properties().requires_input`** to **`false`** for a stage that must generate its own results regardless of upstream wiring. The default remains **`true`**, preserving passthrough for nonempty upstream input and generator fallback for absent or empty input.
 
 ## Streaming vs “blocking” work
 
@@ -85,6 +90,9 @@ Invalid BSON on the wire fails before your business logic runs, with a parse err
 
 - **Log** at info / warn / error / debug (no-ops if the logger is unavailable).
 - Read a cached **extension options** blob (manifest/config) when present.
+- Read **`catalog()`** in source `open` and every generator `next`, including EOF:
+  an owned namespace/UUID snapshot captured at AST bind, with `in_router` and
+  explain verbosity. Missing catalog information remains `None`.
 - Update **operation metrics** (counters and timings serialized for the host).
 - Query **deadlines** and call **`check_interrupt`** so long-running **`next`** / **`transform`** work can cooperate with kills and stepdowns.
 
@@ -118,6 +126,12 @@ The host calls the AST node’s **`get_properties`** to obtain BSON aligned with
 
 - **`StreamType`** — **`Streaming`** or **`Blocking`** (host field **`streamType`**).
 - **`StagePosition`** — **`Anywhere`**, **`First`**, or **`Last`** (host field **`position`**; **`Anywhere`** maps to IDL **`none`**).
+- **`HostTypeRequirement`** — source stages can override **`host_type()`** to return
+  **`Router`**. `export_source_stage!` then adds **`hostType: "router"`**. The
+  default **`None`** omits this field and preserves existing host placement.
+  Erased `SourceOps` hooks can use **`to_document_with_host_type()`**. Placement
+  alone does not make shard-only native stages such as `$_internalSearchIdLookup`
+  executable on `mongos`.
 - **`StageProperties`** — **`stream_type`**, **`position`**, **`requires_input`** (**`requiresInputDocSource`**); use **`StageProperties::to_document()`** or **`StagePlan::static_properties_document()`** for the BSON sent to **`get_properties`** (other IDL fields use host defaults when omitted).
 - **`ExecutionModel`** — **`Streaming`** (pull / per-row) vs **`Blocking`** (buffer then **`finish`**), aligned with **`StageProperties::stream_type`** in the built-in **`StagePlan`** constructors.
 
@@ -125,7 +139,18 @@ The host calls the AST node’s **`get_properties`** to obtain BSON aligned with
 
 Both traits define **`fn expand(&Args) -> Expansion`** ([**`Expansion`**](extension-sdk-mongodb/src/expansion.rs), also re-exported under **`stage_model`**): **`SelfStage`** or **`Pipeline(Vec<Document>)`**. Typed transforms wire **`expand`** through **`export_transform_stage_type!`**; map-only macros keep the single-AST path.
 
-Re-exports at the crate root: **`StageProperties`**, **`StreamType`**, **`StagePosition`**, **`StagePlan`**, **`ExecutionModel`**, **`StageLifecycleShape`**, **`Expansion`**, **`default_map_stage_static_properties`**.
+Re-exports at the crate root: **`StageProperties`**, **`StreamType`**, **`StagePosition`**, **`HostTypeRequirement`**, **`StagePlan`**, **`ExecutionModel`**, **`StageLifecycleShape`**, **`Expansion`**, **`default_map_stage_static_properties`**.
+
+Source stages can optionally implement **`SourceStage::merging_pipeline(args, catalog)`**
+to return native stage documents after catalog bind. The SDK places an owned
+source clone before that suffix in a distributed merger plan; the default is
+`None`. Explicit generators receive a native constant-false `$match` on the
+shards to produce EOF without collection scans. Input-requiring stages retain
+their previous shard input behavior. Raw **`SourceOps`** users set
+**`merging_pipeline: None`** when unused.
+This is a distributed-planning hook, not an unconditional pipeline rewrite.
+See the [experimental mongos-only lookup PoC](e2e-tests/router-lookup/README.md)
+for the verified router-only lookup flow and its current scope.
 
 ## Using the Rust SDK for MongoDB Extensions in your extension
 

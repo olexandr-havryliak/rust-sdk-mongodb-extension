@@ -1,8 +1,9 @@
 //! **Source** (generator) aggregation stage: parses `{$stageName: <args>}` and emits documents from
 //! Rust without requiring an upstream executable stage (e.g. `aggregate: 1` with only this stage).
 //!
-//! When an upstream stage is present (`set_source` was called), this implementation **forwards**
-//! `get_next` to that upstream stage unchanged (passthrough).
+//! Input-requiring stages forward a nonempty upstream unchanged (passthrough).
+//! Stages declaring `requiresInputDocSource: false` always generate their own results,
+//! even when the host attaches an upstream stage such as `$mergeCursors`.
 //!
 //! Use [`export_source_stage!`](crate::export_source_stage) from the crate root.
 
@@ -16,7 +17,7 @@ use crate::byte_buf;
 use crate::error::ExtensionError;
 use crate::expansion::Expansion;
 use crate::stage_model::StagePlan;
-use crate::stage_properties::StageProperties;
+use crate::stage_properties::{HostTypeRequirement, StageProperties};
 use crate::host;
 use crate::panics::ffi_boundary;
 use crate::stage_context::{CatalogContext, StageContext};
@@ -60,6 +61,8 @@ pub struct SourceOps {
     pub static_properties_doc: fn() -> Document,
     /// Parse-time expansion from the inner args document (after BSON decode from the parse node).
     pub expand_inner: fn(Document) -> crate::error::Result<Expansion>,
+    /// Optional post-bind merger suffix; the SDK prepends a clone of this source.
+    pub merging_pipeline: Option<fn(Document, Option<&CatalogContext>) -> crate::error::Result<Option<Vec<Document>>>>,
 }
 
 fn name_view(ops: &SourceOps) -> MongoExtensionByteView {
@@ -99,6 +102,24 @@ pub trait SourceStage: Sized + Send + 'static {
     /// pull / generator, first in pipeline, document source when present).
     fn properties() -> StageProperties {
         StagePlan::source_default().properties
+    }
+
+    /// Placement in a sharded pipeline; override to pin this source to `mongos`.
+    fn host_type() -> HostTypeRequirement {
+        HostTypeRequirement::None
+    }
+
+    /// Optional native stage suffix for a distributed plan's merging pipeline.
+    ///
+    /// Runs after bind, so the namespace is available. The SDK prepends this source
+    /// and suppresses shard input for stages with `requiresInputDocSource: false`.
+    /// Input-requiring stages retain the empty shard pipeline. This is not an unconditional rewrite:
+    /// the host must actually apply distributed planning for the suffix to execute.
+    fn merging_pipeline(
+        _args: &Self::Args,
+        _catalog: Option<&CatalogContext>,
+    ) -> crate::error::Result<Option<Vec<Document>>> {
+        Ok(None)
     }
 }
 
@@ -575,6 +596,7 @@ struct LogicalObj {
     args: Vec<u8>,
     catalog: Option<CatalogContext>,
     ops: &'static SourceOps,
+    plan_applied: bool,
 }
 
 fn logical_alloc(args: Vec<u8>, catalog: Option<CatalogContext>, ops: &'static SourceOps) -> LogicalObj {
@@ -585,6 +607,7 @@ fn logical_alloc(args: Vec<u8>, catalog: Option<CatalogContext>, ops: &'static S
         args,
         catalog,
         ops,
+        plan_applied: false,
     }
 }
 
@@ -675,11 +698,29 @@ unsafe extern "C" fn log_compile(
 }
 
 unsafe extern "C" fn log_dpl(
-    _: *const MongoExtensionLogicalAggStage,
+    p: *const MongoExtensionLogicalAggStage,
     out: *mut *mut MongoExtensionDistributedPlanLogic,
 ) -> *mut MongoExtensionStatus {
     *out = std::ptr::null_mut();
-    status::status_ok()
+    let result = ffi_boundary(|| -> crate::error::Result<Option<*mut MongoExtensionDistributedPlanLogic>> {
+        let this = &*p.cast::<LogicalObj>();
+        if this.plan_applied { return Ok(None); }
+        let Some(hook) = this.ops.merging_pipeline else { return Ok(None); };
+        let args = Document::from_reader(this.args.as_slice())
+            .map_err(|e| ExtensionError::FailedToParse(e.to_string()))?;
+        let Some(suffix) = hook(args, this.catalog.as_ref())? else { return Ok(None); };
+        let mut cloned = logical_alloc(this.args.clone(), this.catalog.clone(), this.ops);
+        cloned.plan_applied = true;
+        let source = crate::distributed_plan::OwnedStage::logical(Box::into_raw(Box::new(cloned)).cast());
+        let suppress_input = !(this.ops.static_properties_doc)()
+            .get_bool("requiresInputDocSource").unwrap_or(true);
+        crate::distributed_plan::build_merger(source, suffix, suppress_input).map(Some)
+    });
+    match result {
+        Some(Ok(plan)) => { *out = plan.unwrap_or(std::ptr::null_mut()); status::status_ok() }
+        Some(Err(e)) => e.into_raw_status(),
+        None => ExtensionError::Runtime("panic during distributed planning".into()).into_raw_status(),
+    }
 }
 
 unsafe extern "C" fn log_clone(
@@ -693,6 +734,7 @@ unsafe extern "C" fn log_clone(
         (*this).ops,
     )))
     .cast::<MongoExtensionLogicalAggStage>();
+    (*n.cast::<LogicalObj>()).plan_applied = (*this).plan_applied;
     *out = n;
     status::status_ok()
 }
@@ -853,6 +895,17 @@ unsafe extern "C" fn exec_get_next(
     let this = p.cast::<ExecObj>();
     let src = (*this).source;
 
+    if (*this).mode.get() == MODE_INIT {
+        let requires_input = ffi_boundary(|| {
+            ((*this).ops.static_properties_doc)().get_bool("requiresInputDocSource").unwrap_or(true)
+        });
+        match requires_input {
+            Some(false) => (*this).mode.set(MODE_GENERATOR),
+            Some(true) => {},
+            None => return ExtensionError::Runtime("panic during source properties".into()).into_raw_status(),
+        }
+    }
+
     // Passthrough: upstream produced at least one row — keep forwarding.
     if (*this).mode.get() == MODE_PASSTHROUGH && !src.is_null() {
         let vt = (*src).vtable;
@@ -916,6 +969,7 @@ unsafe extern "C" fn exec_get_next(
             (*this).state = st;
         }
         let mut sctx = StageContext::new();
+        sctx.bind_catalog((*this).catalog.clone());
         let metrics = (*this).metrics.get();
         sctx.bind_execution(ctx, metrics);
         let out = (ops.next)((*this).state, &mut sctx)?;
@@ -1161,4 +1215,416 @@ pub unsafe fn get_multi_source_extension_impl(
         *extension_out = std::ptr::addr_of!((*obj).base);
     }
     status::status_ok()
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+    use bson::doc;
+    use std::cell::RefCell;
+    use crate::sys::{MongoExtensionNamespaceString, MONGO_EXTENSION_STATUS_OK};
+
+    thread_local! {
+        static OBSERVED: RefCell<Vec<Option<CatalogContext>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn observe(ctx: &StageContext) {
+        OBSERVED.with(|observed| observed.borrow_mut().push(ctx.catalog().cloned()));
+    }
+
+    fn open(_: Document, ctx: &mut StageContext) -> crate::error::Result<*mut c_void> {
+        observe(ctx);
+        Ok(Box::into_raw(Box::new(0i32)).cast())
+    }
+
+    unsafe fn next(state: *mut c_void, ctx: &mut StageContext) -> crate::error::Result<Next> {
+        observe(ctx);
+        let count = &mut *state.cast::<i32>();
+        if *count == 2 {
+            return Ok(Next::Eof);
+        }
+        let document = doc! { "sequence": *count };
+        *count += 1;
+        Ok(Next::Advanced { document, metadata: None })
+    }
+
+    unsafe fn drop_state(state: *mut c_void) {
+        drop(Box::from_raw(state.cast::<i32>()));
+    }
+
+    fn properties() -> Document {
+        StageProperties::source_stage_default().to_document()
+    }
+
+    fn expand(_: Document) -> crate::error::Result<Expansion> {
+        Ok(Expansion::SelfStage)
+    }
+
+    static OPS: SourceOps = SourceOps {
+        name: "$catalogProbe", expect_empty: false,
+        open_from_doc: open, next, drop_state,
+        on_extension_initialized: None,
+        static_properties_doc: properties, expand_inner: expand,
+        merging_pipeline: None,
+    };
+
+    fn generator_properties() -> Document {
+        let mut properties = properties();
+        properties.insert("requiresInputDocSource", false);
+        properties
+    }
+
+    static GENERATOR_OPS: SourceOps = SourceOps { static_properties_doc: generator_properties, ..OPS };
+
+    fn view(bytes: &[u8]) -> MongoExtensionByteView {
+        MongoExtensionByteView { data: bytes.as_ptr(), len: bytes.len() as u64 }
+    }
+
+    fn raw_catalog(db: &[u8], collection: &[u8], uuid: &[u8], router: u8) -> MongoExtensionCatalogContext {
+        MongoExtensionCatalogContext {
+            namespace_string: MongoExtensionNamespaceString {
+                database_name: view(db), collection_name: view(collection),
+            },
+            uuid_string: view(uuid), in_router: router,
+            verbosity: MongoExtensionExplainVerbosity::kQueryPlanner,
+        }
+    }
+
+    unsafe fn assert_ok(st: *mut MongoExtensionStatus) {
+        assert!(!st.is_null());
+        let code = ((*(*st).vtable).get_code)(st);
+        ((*(*st).vtable).destroy)(st);
+        assert_eq!(code, MONGO_EXTENSION_STATUS_OK);
+    }
+
+    unsafe fn compile(ctx: *const MongoExtensionCatalogContext) -> *mut MongoExtensionExecAggStage {
+        let mut bytes = Vec::new();
+        Document::new().to_writer(&mut bytes).unwrap();
+        let ast = Box::into_raw(Box::new(ast_alloc(bytes, &OPS))).cast();
+        let mut logical = std::ptr::null_mut();
+        assert_ok(ast_bind(ast, ctx, &mut logical));
+        ast_ext_destroy(ast);
+        let mut clone = std::ptr::null_mut();
+        assert_ok(log_clone(logical, &mut clone));
+        log_destroy(logical);
+        let mut exec = std::ptr::null_mut();
+        assert_ok(log_compile(clone, &mut exec));
+        log_destroy(clone);
+        exec
+    }
+
+    unsafe fn run(exec: *mut MongoExtensionExecAggStage) -> Vec<Option<CatalogContext>> {
+        OBSERVED.with(|observed| observed.borrow_mut().clear());
+        let mut documents = Vec::new();
+        for _ in 0..4 {
+            let mut result = std::mem::MaybeUninit::<MongoExtensionGetNextResult>::uninit();
+            assert_ok(exec_get_next(exec, std::ptr::null_mut(), result.as_mut_ptr()));
+            let result = result.assume_init();
+            if result.code == MongoExtensionGetNextResultCode::kAdvanced {
+                assert_eq!(result.result_document.type_ as u32, MongoExtensionByteContainerType::kByteBuf as u32);
+                let buffer = result.result_document.bytes.buf;
+                let view = ((*(*buffer).vtable).get_view)(buffer);
+                documents.push(Document::from_reader(std::slice::from_raw_parts(view.data, view.len as usize)).unwrap());
+                ((*(*buffer).vtable).destroy)(buffer);
+            } else {
+                assert!(result.code == MongoExtensionGetNextResultCode::kEOF);
+            }
+        }
+        exec_destroy(exec);
+        assert_eq!(documents, vec![doc! {"sequence": 0i32}, doc! {"sequence": 1i32}]);
+        OBSERVED.with(|observed| observed.borrow().clone())
+    }
+
+    #[test]
+    fn explicit_generator_ignores_nonempty_upstream_on_router_and_replica_set() {
+        for in_router in [false, true] {
+            let catalog = CatalogContext { database_name: "shop".into(), collection_name: "products".into(),
+                uuid: None, in_router, verbosity: 0 };
+            let observed = unsafe {
+                let args = bson::to_vec(&doc! {}).unwrap();
+                let upstream = Box::into_raw(Box::new(exec_alloc(args.clone(), None, &OPS))).cast();
+                let exec = Box::into_raw(Box::new(exec_alloc(args, Some(catalog.clone()), &GENERATOR_OPS))).cast();
+                assert_ok(exec_set_source(exec, upstream));
+                let observed = run(exec);
+                exec_destroy(upstream);
+                observed
+            };
+            assert_eq!(observed, vec![Some(catalog); 4], "generator must not open or read upstream");
+        }
+    }
+
+    #[test]
+    fn input_requiring_source_preserves_nonempty_upstream_passthrough() {
+        let observed = unsafe {
+            let args = bson::to_vec(&doc! {}).unwrap();
+            let upstream = Box::into_raw(Box::new(exec_alloc(args.clone(), None, &OPS))).cast();
+            let catalog = CatalogContext { database_name: "shop".into(), collection_name: "products".into(),
+                uuid: None, in_router: false, verbosity: 0 };
+            let exec = Box::into_raw(Box::new(exec_alloc(args, Some(catalog), &OPS))).cast();
+            assert_ok(exec_set_source(exec, upstream));
+            let observed = run(exec);
+            exec_destroy(upstream);
+            observed
+        };
+        assert_eq!(observed, vec![None; 4], "legacy source must forward the upstream sequence");
+    }
+
+    unsafe fn upstream_error(_: *mut c_void, _: &mut StageContext) -> crate::error::Result<Next> {
+        Err(ExtensionError::Runtime("upstream must not be read".into()))
+    }
+    static ERROR_UPSTREAM_OPS: SourceOps = SourceOps { next: upstream_error, ..OPS };
+
+    #[test]
+    fn explicit_generator_does_not_read_upstream_errors() {
+        let catalog = CatalogContext { database_name: "shop".into(), collection_name: "products".into(),
+            uuid: None, in_router: true, verbosity: 0 };
+        let observed = unsafe {
+            let args = bson::to_vec(&doc! {}).unwrap();
+            let upstream = Box::into_raw(Box::new(exec_alloc(args.clone(), None, &ERROR_UPSTREAM_OPS))).cast();
+            let exec = Box::into_raw(Box::new(exec_alloc(args, Some(catalog.clone()), &GENERATOR_OPS))).cast();
+            assert_ok(exec_set_source(exec, upstream));
+            let observed = run(exec);
+            exec_destroy(upstream);
+            observed
+        };
+        assert_eq!(observed, vec![Some(catalog); 4]);
+    }
+
+    unsafe fn upstream_eof(_: *mut c_void, ctx: &mut StageContext) -> crate::error::Result<Next> {
+        observe(ctx);
+        Ok(Next::Eof)
+    }
+    static EMPTY_UPSTREAM_OPS: SourceOps = SourceOps { next: upstream_eof, ..OPS };
+
+    #[test]
+    fn input_requiring_source_keeps_generator_fallback_after_empty_upstream() {
+        let catalog = CatalogContext { database_name: "shop".into(), collection_name: "products".into(),
+            uuid: None, in_router: false, verbosity: 0 };
+        let observed = unsafe {
+            let args = bson::to_vec(&doc! {}).unwrap();
+            let upstream = Box::into_raw(Box::new(exec_alloc(args.clone(), None, &EMPTY_UPSTREAM_OPS))).cast();
+            let exec = Box::into_raw(Box::new(exec_alloc(args, Some(catalog.clone()), &OPS))).cast();
+            assert_ok(exec_set_source(exec, upstream));
+            let observed = run(exec);
+            exec_destroy(upstream);
+            observed
+        };
+        let mut expected = vec![None, None];
+        expected.extend(vec![Some(catalog); 4]);
+        assert_eq!(observed, expected);
+    }
+
+    fn panic_properties() -> Document { panic!("properties test panic"); }
+    static PANIC_PROPERTIES_OPS: SourceOps = SourceOps { static_properties_doc: panic_properties, ..OPS };
+
+    #[test]
+    fn generator_property_panic_does_not_cross_execution_ffi() {
+        unsafe {
+            let exec = Box::into_raw(Box::new(exec_alloc(bson::to_vec(&doc! {}).unwrap(), None, &PANIC_PROPERTIES_OPS))).cast();
+            let mut result = std::mem::MaybeUninit::<MongoExtensionGetNextResult>::uninit();
+            assert_error(exec_get_next(exec, std::ptr::null_mut(), result.as_mut_ptr()));
+            exec_destroy(exec);
+        }
+    }
+
+    #[test]
+    fn generator_next_sees_router_catalog_bound_at_ast_bind() {
+        let raw = raw_catalog(b"catalog", b"articles", b"", 1);
+        let expected = unsafe { catalog_context_from_raw(&raw) }.unwrap();
+        assert!(expected.in_router);
+        assert_eq!(expected.namespace(), "catalog.articles");
+        assert_eq!(expected.uuid, None);
+        let observed = unsafe { run(compile(&raw)) };
+        assert_eq!(observed, vec![Some(expected); 4], "open, both rows and EOF must see router catalog");
+    }
+
+    #[test]
+    fn catalog_snapshot_survives_logical_clone_and_host_buffer_release() {
+        let (exec, expected) = {
+            let db = b"search_demo".to_vec();
+            let collection = b"products".to_vec();
+            let uuid = b"11111111-1111-1111-1111-111111111111".to_vec();
+            let raw = raw_catalog(&db, &collection, &uuid, 0);
+            (unsafe { compile(&raw) }, unsafe { catalog_context_from_raw(&raw) }.unwrap())
+        };
+        assert!(!expected.in_router);
+        assert_eq!(unsafe { run(exec) }, vec![Some(expected); 4]);
+    }
+
+    #[test]
+    fn absent_catalog_is_safe_through_bind_compile_and_execution() {
+        assert_eq!(unsafe { run(compile(std::ptr::null())) }, vec![None; 4]);
+    }
+
+    #[test]
+    fn incomplete_catalog_namespace_is_not_exposed() {
+        for raw in [raw_catalog(b"", b"articles", b"", 1), raw_catalog(b"catalog", b"", b"", 1)] {
+            assert_eq!(unsafe { catalog_context_from_raw(&raw) }, None);
+        }
+        assert_eq!(unsafe { catalog_context_from_raw(std::ptr::null()) }, None);
+    }
+
+    fn merger(_: Document, catalog: Option<&CatalogContext>) -> crate::error::Result<Option<Vec<Document>>> {
+        Ok(catalog.filter(|c| c.in_router).map(|_| Vec::new()))
+    }
+
+    static ROUTER_OPS: SourceOps = SourceOps { merging_pipeline: Some(merger), ..OPS };
+
+    #[test]
+    fn bound_router_returns_merger_plan_with_owned_source_clone() {
+        unsafe {
+            let catalog = CatalogContext { database_name: "shop".into(), collection_name: "products".into(),
+                uuid: None, in_router: true, verbosity: 0 };
+            let args = bson::to_vec(&doc! {}).unwrap();
+            let logical = Box::into_raw(Box::new(logical_alloc(args, Some(catalog.clone()), &ROUTER_OPS))).cast();
+            let mut plan = std::ptr::null_mut();
+            assert_ok(log_dpl(logical, &mut plan));
+            assert!(!plan.is_null(), "router merger hook must produce a DPL object");
+            log_destroy(logical);
+            let vt = &*(*plan).vtable;
+            let mut shards = std::ptr::null_mut();
+            assert_ok((vt.extract_shards_pipeline)(plan, &mut shards));
+            assert!(shards.is_null());
+            let mut merging = std::ptr::null_mut();
+            assert_ok((vt.extract_merging_pipeline)(plan, &mut merging));
+            (vt.destroy)(plan);
+            let cvt = &*(*merging).vtable;
+            assert_eq!((cvt.size)(merging), 1);
+            let mut elements = Vec::<crate::sys::MongoExtensionDPLArrayElement>::with_capacity(1);
+            let mut array = crate::sys::MongoExtensionDPLArray { size: 1, elements: elements.as_mut_ptr() };
+            assert_ok((cvt.transfer)(merging, &mut array));
+            elements.set_len(1);
+            (cvt.destroy)(merging);
+            let cloned = elements[0].element.logical_stage;
+            assert_eq!((*cloned.cast::<LogicalObj>()).catalog, Some(catalog));
+            let mut nested_plan = std::ptr::null_mut();
+            assert_ok(log_dpl(cloned, &mut nested_plan));
+            assert!(nested_plan.is_null(), "merger clone must not expand recursively");
+            log_destroy(cloned);
+        }
+    }
+
+    #[test]
+    fn default_source_has_no_distributed_plan() {
+        unsafe {
+            let logical = Box::into_raw(Box::new(logical_alloc(bson::to_vec(&doc! {}).unwrap(), None, &OPS))).cast();
+            let mut plan = std::ptr::null_mut();
+            assert_ok(log_dpl(logical, &mut plan));
+            assert!(plan.is_null());
+            log_destroy(logical);
+        }
+    }
+
+    unsafe fn make_merger_plan() -> *mut MongoExtensionDistributedPlanLogic {
+        let catalog = CatalogContext { database_name: "shop".into(), collection_name: "products".into(),
+            uuid: None, in_router: true, verbosity: 0 };
+        let logical = Box::into_raw(Box::new(logical_alloc(bson::to_vec(&doc! {}).unwrap(), Some(catalog), &ROUTER_OPS))).cast();
+        let mut plan = std::ptr::null_mut();
+        assert_ok(log_dpl(logical, &mut plan));
+        log_destroy(logical);
+        assert!(!plan.is_null());
+        plan
+    }
+
+    unsafe fn assert_error(st: *mut MongoExtensionStatus) {
+        assert!(!st.is_null());
+        let code = ((*(*st).vtable).get_code)(st);
+        ((*(*st).vtable).destroy)(st);
+        assert_ne!(code, MONGO_EXTENSION_STATUS_OK);
+    }
+
+    #[test]
+    fn dpl_extraction_is_single_use_and_does_not_require_sort_metadata() {
+        unsafe {
+            let plan = make_merger_plan();
+            let vt = &*(*plan).vtable;
+            let mut sort = std::ptr::null_mut();
+            assert_ok((vt.get_sort_pattern)(plan, &mut sort));
+            assert!(sort.is_null());
+            let mut shards = std::ptr::null_mut();
+            assert_ok((vt.extract_shards_pipeline)(plan, &mut shards));
+            assert_error((vt.extract_shards_pipeline)(plan, &mut shards));
+            let mut merging = std::ptr::null_mut();
+            assert_ok((vt.extract_merging_pipeline)(plan, &mut merging));
+            let mut again = std::ptr::null_mut();
+            assert_error((vt.extract_merging_pipeline)(plan, &mut again));
+            assert!(again.is_null());
+            ((*(*merging).vtable).destroy)(merging);
+            (vt.destroy)(plan);
+        }
+    }
+
+    #[test]
+    fn dpl_rejects_invalid_transfer_without_consuming_owned_stages() {
+        unsafe {
+            let plan = make_merger_plan();
+            let mut merging = std::ptr::null_mut();
+            assert_ok(((*(*plan).vtable).extract_merging_pipeline)(plan, &mut merging));
+            ((*(*plan).vtable).destroy)(plan);
+            let vt = &*(*merging).vtable;
+            assert_error((vt.transfer)(merging, std::ptr::null_mut()));
+            let mut array = crate::sys::MongoExtensionDPLArray { size: 0, elements: std::ptr::null_mut() };
+            assert_error((vt.transfer)(merging, &mut array));
+            array.size = 1;
+            assert_error((vt.transfer)(merging, &mut array));
+            assert_eq!((vt.size)(merging), 1);
+            let mut elements = Vec::<crate::sys::MongoExtensionDPLArrayElement>::with_capacity(1);
+            array.elements = elements.as_mut_ptr();
+            assert_ok((vt.transfer)(merging, &mut array));
+            elements.set_len(1);
+            assert_eq!((vt.size)(merging), 0);
+            assert_error((vt.transfer)(merging, &mut array));
+            (vt.destroy)(merging);
+            log_destroy(elements[0].element.logical_stage);
+        }
+    }
+
+    #[test]
+    fn dpl_plan_can_be_destroyed_without_extracting_owned_merger() {
+        unsafe {
+            let plan = make_merger_plan();
+            ((*(*plan).vtable).destroy)(plan);
+        }
+    }
+
+    fn panic_merger(_: Document, _: Option<&CatalogContext>) -> crate::error::Result<Option<Vec<Document>>> {
+        panic!("DPL test panic");
+    }
+    static PANIC_OPS: SourceOps = SourceOps { merging_pipeline: Some(panic_merger), ..OPS };
+
+    #[test]
+    fn dpl_hook_panic_is_contained_at_ffi_boundary() {
+        unsafe {
+            let logical = Box::into_raw(Box::new(logical_alloc(bson::to_vec(&doc! {}).unwrap(), None, &PANIC_OPS))).cast();
+            let mut plan = std::ptr::null_mut();
+            assert_error(log_dpl(logical, &mut plan));
+            assert!(plan.is_null());
+            log_destroy(logical);
+        }
+    }
+
+    #[test]
+    fn dpl_invalid_bson_is_reported_without_a_plan() {
+        unsafe {
+            let logical = Box::into_raw(Box::new(logical_alloc(vec![0], None, &ROUTER_OPS))).cast();
+            let mut plan = std::ptr::null_mut();
+            assert_error(log_dpl(logical, &mut plan));
+            assert!(plan.is_null());
+            log_destroy(logical);
+        }
+    }
+
+    #[test]
+    fn dpl_hook_can_decline_missing_and_shard_catalogs() {
+        for catalog in [None, Some(CatalogContext { database_name: "shop".into(), collection_name: "products".into(),
+            uuid: None, in_router: false, verbosity: 0 })] {
+            unsafe {
+                let logical = Box::into_raw(Box::new(logical_alloc(bson::to_vec(&doc! {}).unwrap(), catalog, &ROUTER_OPS))).cast();
+                let mut plan = std::ptr::null_mut();
+                assert_ok(log_dpl(logical, &mut plan));
+                assert!(plan.is_null());
+                log_destroy(logical);
+            }
+        }
+    }
 }

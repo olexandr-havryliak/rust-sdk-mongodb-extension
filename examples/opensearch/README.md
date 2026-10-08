@@ -4,6 +4,10 @@
 
 Run commands from the repository root. Only Docker is required; MongoDB clients,
 connectors, ML inference, and tests all run in containers.
+The demo mongod uses `--wiredTigerCacheSizeGB 0.25` (256 MiB of internal cache,
+not a total process-memory limit). JVM heap settings are unchanged. Run this
+and the [mongos demo](../opensearch-mongos/README.md) separately, stopping one
+stack before starting the other.
 
 For an older disposable demo that indexed `name`, use the cleanup command in
 section 8 before starting this version. Changing field projection alone does

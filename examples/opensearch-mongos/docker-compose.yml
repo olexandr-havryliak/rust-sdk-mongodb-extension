@@ -1,0 +1,334 @@
+{
+  "services": {
+    "config": {
+      "image": "${MONGO_IMAGE:-mongodb/mongodb-community-server:9.0-ubi9}",
+      "entrypoint": [
+        "mongod"
+      ],
+      "command": [
+        "--configsvr",
+        "--replSet",
+        "csrs",
+        "--port",
+        "27017",
+        "--bind_ip_all",
+        "--wiredTigerCacheSizeGB",
+        "0.25"
+      ],
+      "environment": {
+        "RS_NAME": "csrs",
+        "RS_HOST": "config:27017",
+        "RS_CONFIG": "true"
+      },
+      "volumes": [
+        "./scripts:/scripts:ro"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "mongosh --quiet --eval 'process.exit(db.adminCommand({ping:1}).ok ? 0 : 1)'"
+        ],
+        "interval": "3s",
+        "timeout": "5s",
+        "retries": 40
+      }
+    },
+    "shard0": {
+      "image": "${MONGO_IMAGE:-mongodb/mongodb-community-server:9.0-ubi9}",
+      "entrypoint": [
+        "mongod"
+      ],
+      "command": [
+        "--shardsvr",
+        "--replSet",
+        "shard0",
+        "--port",
+        "27017",
+        "--bind_ip_all",
+        "--wiredTigerCacheSizeGB",
+        "0.25"
+      ],
+      "environment": {
+        "RS_NAME": "shard0",
+        "RS_HOST": "shard0:27017"
+      },
+      "volumes": [
+        "./scripts:/scripts:ro"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "mongosh --quiet --eval 'process.exit(db.adminCommand({ping:1}).ok ? 0 : 1)'"
+        ],
+        "interval": "3s",
+        "timeout": "5s",
+        "retries": 40
+      }
+    },
+    "shard1": {
+      "image": "${MONGO_IMAGE:-mongodb/mongodb-community-server:9.0-ubi9}",
+      "entrypoint": [
+        "mongod"
+      ],
+      "command": [
+        "--shardsvr",
+        "--replSet",
+        "shard1",
+        "--port",
+        "27017",
+        "--bind_ip_all",
+        "--wiredTigerCacheSizeGB",
+        "0.25"
+      ],
+      "environment": {
+        "RS_NAME": "shard1",
+        "RS_HOST": "shard1:27017"
+      },
+      "volumes": [
+        "./scripts:/scripts:ro"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "mongosh --quiet --eval 'process.exit(db.adminCommand({ping:1}).ok ? 0 : 1)'"
+        ],
+        "interval": "3s",
+        "timeout": "5s",
+        "retries": 40
+      }
+    },
+    "mongos": {
+      "build": {
+        "context": "../..",
+        "dockerfile": "examples/opensearch-mongos/Dockerfile"
+      },
+      "command": [
+        "--configdb",
+        "csrs/config:27017",
+        "--port",
+        "27017",
+        "--bind_ip_all",
+        "--setParameter",
+        "featureFlagExtensionsAPI=true",
+        "--setParameter",
+        "featureFlagExtensionsApiSignatureValidation=false",
+        "--extensionsConfigPath",
+        "/etc/mongo/extensions",
+        "--loadExtensions",
+        "opensearch_mongos"
+      ],
+      "ports": [
+        "27040:27017"
+      ],
+      "volumes": [
+        "./scripts:/scripts:ro"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "mongosh --quiet --eval 'process.exit(db.adminCommand({ping:1}).ok ? 0 : 1)'"
+        ],
+        "interval": "3s",
+        "timeout": "5s",
+        "retries": 40
+      }
+    },
+    "kafka": {
+      "image": "${KAFKA_IMAGE:-confluentinc/cp-kafka:7.8.0}",
+      "hostname": "kafka",
+      "environment": {
+        "KAFKA_NODE_ID": 1,
+        "KAFKA_PROCESS_ROLES": "broker,controller",
+        "KAFKA_CONTROLLER_QUORUM_VOTERS": "1@kafka:9093",
+        "KAFKA_LISTENERS": "PLAINTEXT://kafka:9092,CONTROLLER://kafka:9093",
+        "KAFKA_ADVERTISED_LISTENERS": "PLAINTEXT://kafka:9092",
+        "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP": "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT",
+        "KAFKA_INTER_BROKER_LISTENER_NAME": "PLAINTEXT",
+        "KAFKA_CONTROLLER_LISTENER_NAMES": "CONTROLLER",
+        "KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR": 1,
+        "KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR": 1,
+        "KAFKA_TRANSACTION_STATE_LOG_MIN_ISR": 1,
+        "KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS": 0,
+        "KAFKA_AUTO_CREATE_TOPICS_ENABLE": "true",
+        "KAFKA_NUM_PARTITIONS": 1,
+        "CLUSTER_ID": "MkU3OEVBNTcwNTJENDM2Qk"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "kafka-topics --bootstrap-server kafka:9092 --list >/dev/null 2>&1"
+        ],
+        "interval": "5s",
+        "timeout": "10s",
+        "retries": 40
+      }
+    },
+    "connect": {
+      "build": {
+        "context": "../..",
+        "dockerfile": "examples/opensearch/Dockerfile.connect"
+      },
+      "ports": [
+        "8084:8083"
+      ],
+      "depends_on": {
+        "kafka": {
+          "condition": "service_healthy"
+        }
+      },
+      "environment": {
+        "CONNECT_BOOTSTRAP_SERVERS": "kafka:9092",
+        "CONNECT_REST_ADVERTISED_HOST_NAME": "connect",
+        "CONNECT_GROUP_ID": "opensearch-mongos-connect",
+        "CONNECT_OFFSET_FLUSH_INTERVAL_MS": 1000,
+        "CONNECT_CONFIG_STORAGE_TOPIC": "_connect-configs",
+        "CONNECT_OFFSET_STORAGE_TOPIC": "_connect-offsets",
+        "CONNECT_STATUS_STORAGE_TOPIC": "_connect-status",
+        "CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR": 1,
+        "CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR": 1,
+        "CONNECT_STATUS_STORAGE_REPLICATION_FACTOR": 1,
+        "CONNECT_KEY_CONVERTER": "org.apache.kafka.connect.storage.StringConverter",
+        "CONNECT_VALUE_CONVERTER": "org.apache.kafka.connect.storage.StringConverter",
+        "CONNECT_PLUGIN_PATH": "/usr/share/java,/usr/share/confluent-hub-components",
+        "CONNECT_LOG4J_ROOT_LOGLEVEL": "INFO"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "curl -fsS http://localhost:8083/connectors >/dev/null"
+        ],
+        "interval": "5s",
+        "timeout": "10s",
+        "retries": 40
+      }
+    },
+    "opensearch": {
+      "image": "${OPENSEARCH_IMAGE:-opensearchproject/opensearch:2.19.0}",
+      "environment": {
+        "discovery.type": "single-node",
+        "plugins.security.disabled": "true",
+        "bootstrap.memory_lock": "true",
+        "OPENSEARCH_JAVA_OPTS": "-Xms2g -Xmx2g",
+        "DISABLE_INSTALL_DEMO_CONFIG": "true"
+      },
+      "ulimits": {
+        "memlock": {
+          "soft": -1,
+          "hard": -1
+        }
+      },
+      "ports": [
+        "9201:9200"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "curl -fsS http://localhost:9200/_cluster/health >/dev/null"
+        ],
+        "interval": "5s",
+        "timeout": "10s",
+        "retries": 40
+      }
+    },
+    "opensearch-model": {
+      "image": "python:3.11-slim",
+      "depends_on": {
+        "opensearch": {
+          "condition": "service_healthy"
+        }
+      },
+      "volumes": [
+        "../opensearch/scripts/register-opensearch-model.py:/register-opensearch-model.py:ro",
+        "opensearch-model:/model"
+      ],
+      "environment": {
+        "OPENSEARCH_MODEL_GROUP": "mongodb-mongos-poc"
+      },
+      "command": [
+        "python",
+        "/register-opensearch-model.py"
+      ],
+      "restart": "no"
+    },
+    "opensearch-setup": {
+      "image": "python:3.11-slim",
+      "depends_on": {
+        "opensearch-model": {
+          "condition": "service_completed_successfully"
+        }
+      },
+      "volumes": [
+        "../opensearch/scripts:/scripts:ro",
+        "./config:/config:ro",
+        "opensearch-model:/model:ro"
+      ],
+      "command": [
+        "python",
+        "/scripts/setup-opensearch.py"
+      ],
+      "restart": "no"
+    },
+    "connect-setup": {
+      "image": "curlimages/curl:8.10.1",
+      "depends_on": {
+        "connect": {
+          "condition": "service_healthy"
+        },
+        "opensearch-setup": {
+          "condition": "service_completed_successfully"
+        }
+      },
+      "volumes": [
+        "./scripts:/scripts:ro",
+        "./config:/config:ro"
+      ],
+      "command": [
+        "/bin/sh",
+        "/scripts/register-connectors.sh"
+      ],
+      "restart": "no"
+    },
+    "tests": {
+      "build": {
+        "context": "../..",
+        "dockerfile": "examples/opensearch/tests/Dockerfile"
+      },
+      "profiles": [
+        "test"
+      ],
+      "volumes": [
+        ".:/demo:ro"
+      ],
+      "working_dir": "/demo/tests",
+      "command": [
+        "python",
+        "-m",
+        "unittest",
+        "-v",
+        "test_configuration",
+        "test_flow"
+      ]
+    },
+    "opensearch-dashboards": {
+      "image": "opensearchproject/opensearch-dashboards:2.19.0",
+      "profiles": [
+        "dashboards"
+      ],
+      "depends_on": {
+        "opensearch": {
+          "condition": "service_healthy"
+        }
+      },
+      "environment": {
+        "OPENSEARCH_HOSTS": "[\"http://opensearch:9200\"]",
+        "DISABLE_SECURITY_DASHBOARDS_PLUGIN": "true"
+      },
+      "ports": [
+        "5602:5601"
+      ]
+    }
+  },
+  "volumes": {
+    "opensearch-model": {}
+  }
+}

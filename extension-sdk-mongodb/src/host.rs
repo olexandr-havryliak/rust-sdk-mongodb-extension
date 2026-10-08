@@ -80,6 +80,37 @@ pub fn create_id_lookup_ast(spec: &Document) -> Result<*mut MongoExtensionAggSta
     Ok(out)
 }
 
+pub(crate) fn create_host_parse_node(spec: &Document) -> Result<*mut crate::sys::MongoExtensionAggStageParseNode> {
+    let vt = host_services_vtable()
+        .ok_or_else(|| ExtensionError::Runtime("host services not initialized".into()))?;
+    let raw = bson::to_vec(spec).map_err(|e| ExtensionError::FailedToParse(e.to_string()))?;
+    let mut out = std::ptr::null_mut();
+    unsafe {
+        let st = (vt.create_host_agg_stage_parse_node)(MongoExtensionByteView {
+            data: raw.as_ptr(), len: raw.len() as u64,
+        }, &mut out);
+        if st.is_null() {
+            return Err(ExtensionError::Runtime("null status from create_host_agg_stage_parse_node".into()));
+        }
+        let svt = &*(*st).vtable;
+        let code = (svt.get_code)(st);
+        let reason = (svt.get_reason)(st);
+        let message = if reason.data.is_null() || reason.len == 0 {
+            "create_host_agg_stage_parse_node failed".into()
+        } else {
+            String::from_utf8_lossy(std::slice::from_raw_parts(reason.data, reason.len as usize)).into_owned()
+        };
+        (svt.destroy)(st);
+        if code != MONGO_EXTENSION_STATUS_OK {
+            return Err(ExtensionError::HostError { code, reason: message });
+        }
+    }
+    if out.is_null() {
+        return Err(ExtensionError::Runtime("host returned null parse node".into()));
+    }
+    Ok(out)
+}
+
 /// Call `register_stage_descriptor` on the portal.
 pub unsafe fn register_stage_descriptor(
     portal: *const MongoExtensionHostPortal,
