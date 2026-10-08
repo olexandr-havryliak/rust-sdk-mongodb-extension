@@ -4,12 +4,14 @@ members = [
     "extension-sys-mongodb",
     "extension-sdk-mongodb",
     "e2e-tests/e2e-extension",
+    "e2e-tests/router-lookup-extension",
     "e2e-tests/mongo-extension-fuzz",
     "examples/fibonacci/fibonacci-extension",
     "examples/http-fetch/http-fetch-extension",
     "examples/data-federation/data-federation-extension",
     "examples/opensearch/extension-core",
     "examples/opensearch/extension",
+    "examples/opensearch-mongos/extension",
 ]
 
 [workspace.package]

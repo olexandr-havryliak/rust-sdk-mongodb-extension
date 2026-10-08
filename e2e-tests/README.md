@@ -66,6 +66,29 @@ Override MongoDB base image:
 MONGO_IMAGE=mongodb/mongodb-community-server:9.0-ubi9 ./e2e-tests/run-e2e.sh
 ```
 
+### Experimental router-only distributed lookup
+
+The [router lookup PoC](router-lookup/README.md) uses one mongos, one single-node
+CSRS, and two single-node shards. Only mongos loads the test extension. It
+investigates post-bind DPL construction of `$lookup` without a client-supplied
+namespace or MongoDB server changes. It verifies full documents, candidate
+order, scores, missing/repeated IDs, updates, and absence of shard collection
+scans. It is separate from the standalone OpenSearch smoke flow.
+
+```bash
+bash e2e-tests/run-router-lookup-poc.sh
+```
+
+The [OpenSearch mongos integration](../examples/opensearch-mongos/README.md)
+adds standard Kafka connectors, real embeddings, range/hashed/compound keys,
+cross-shard duplicate IDs, CRUD, and score metadata:
+
+```bash
+bash examples/opensearch-mongos/run-demo.sh build
+bash examples/opensearch-mongos/run-demo.sh up
+bash examples/opensearch-mongos/run-demo.sh test
+```
+
 ### Random aggregation fuzz (Docker + live `mongod`)
 
 Sends bounded random pipelines starting with **`$vectorSearch`** (same stack and extension as e2e). Occasionally appends **`$match`** / **`$project`**. Not LLVM libFuzzer; uses **`maxTimeMS`** per aggregate and alternates empty vs non-empty collections.

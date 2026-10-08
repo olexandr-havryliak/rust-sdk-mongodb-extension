@@ -1139,6 +1139,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "opensearch_mongos_extension"
+version = "0.1.0"
+dependencies = [
+ "bson",
+ "extension-sdk-mongodb",
+ "opensearch_extension_core",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1384,6 +1395,14 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "router_lookup_extension"
+version = "0.1.0"
+dependencies = [
+ "bson",
+ "extension-sdk-mongodb",
 ]
 
 [[package]]

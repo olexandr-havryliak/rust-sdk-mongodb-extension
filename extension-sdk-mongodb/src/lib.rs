@@ -36,6 +36,7 @@ pub mod operation_metrics;
 pub mod panics;
 pub mod passthrough;
 pub mod source_stage;
+mod distributed_plan;
 pub mod stage_context;
 pub mod stage_model;
 pub mod stage_output;
@@ -58,7 +59,7 @@ pub use source_stage::{get_multi_source_extension_impl, get_source_extension_imp
 pub use stage_context::{OperationMetricsSink, StageContext};
 pub use stage_model::{ExecutionModel, StageLifecycleShape, StagePlan};
 pub use stage_output::Next;
-pub use stage_properties::{default_map_stage_static_properties, StagePosition, StageProperties, StreamType};
+pub use stage_properties::{default_map_stage_static_properties, HostTypeRequirement, StagePosition, StageProperties, StreamType};
 pub use transform_stage::TransformStage;
 
 /// Defines `get_mongodb_extension` exporting a single passthrough transform stage.
@@ -293,13 +294,22 @@ macro_rules! export_source_stage {
             <$t as $crate::source_stage::SourceStage>::next(s, ctx)
         }
         fn __sdk_source_static_properties() -> bson::Document {
-            <$t as $crate::source_stage::SourceStage>::properties().to_document()
+            <$t as $crate::source_stage::SourceStage>::properties().to_document_with_host_type(
+                <$t as $crate::source_stage::SourceStage>::host_type(),
+            )
         }
         fn __sdk_source_expand_inner(
             d: bson::Document,
         ) -> $crate::error::Result<$crate::expansion::Expansion> {
             let a = <$t as $crate::source_stage::SourceStage>::parse(d)?;
             Ok(<$t as $crate::source_stage::SourceStage>::expand(&a))
+        }
+        fn __sdk_source_merging_pipeline(
+            d: bson::Document,
+            catalog: Option<&$crate::stage_context::CatalogContext>,
+        ) -> $crate::error::Result<Option<Vec<bson::Document>>> {
+            let a = <$t as $crate::source_stage::SourceStage>::parse(d)?;
+            <$t as $crate::source_stage::SourceStage>::merging_pipeline(&a, catalog)
         }
         static __SDK_SOURCE_OPS: $crate::source_stage::SourceOps = $crate::source_stage::SourceOps {
             name: <$t as $crate::source_stage::SourceStage>::NAME,
@@ -310,6 +320,7 @@ macro_rules! export_source_stage {
             on_extension_initialized: None,
             static_properties_doc: __sdk_source_static_properties,
             expand_inner: __sdk_source_expand_inner,
+            merging_pipeline: Some(__sdk_source_merging_pipeline),
         };
         #[no_mangle]
         pub unsafe extern "C" fn get_mongodb_extension_versions(

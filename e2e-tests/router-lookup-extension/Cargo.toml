@@ -1,0 +1,13 @@
+[package]
+name = "router_lookup_extension"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Router-only distributed lookup proof of concept for the Rust SDK for MongoDB Extensions"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bson = "2.15"
+extension-sdk-mongodb = { path = "../../extension-sdk-mongodb" }

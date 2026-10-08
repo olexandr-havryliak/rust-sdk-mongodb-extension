@@ -13,6 +13,8 @@ services:
         "--replSet",
         "rs0",
         "--bind_ip_all",
+        "--wiredTigerCacheSizeGB",
+        "0.25",
         "--setParameter",
         "featureFlagExtensionsAPI=true",
         "--setParameter",

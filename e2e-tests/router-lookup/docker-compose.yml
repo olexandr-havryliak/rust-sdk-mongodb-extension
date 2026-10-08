@@ -1,0 +1,51 @@
+services:
+  config:
+    image: ${MONGO_IMAGE:-mongodb/mongodb-community-server:9.0-ubi9}
+    entrypoint: [mongod]
+    command: [--configsvr, --replSet, csrs, --port, "27017", --bind_ip_all]
+    environment:
+      RS_NAME: csrs
+      RS_CONFIG: "true"
+      RS_HOST: config:27017
+    volumes:
+      - ./scripts:/scripts:ro
+  shard0:
+    image: ${MONGO_IMAGE:-mongodb/mongodb-community-server:9.0-ubi9}
+    entrypoint: [mongod]
+    command: [--shardsvr, --replSet, shard0, --port, "27017", --bind_ip_all]
+    environment:
+      RS_NAME: shard0
+      RS_HOST: shard0:27017
+    volumes:
+      - ./scripts:/scripts:ro
+  shard1:
+    image: ${MONGO_IMAGE:-mongodb/mongodb-community-server:9.0-ubi9}
+    entrypoint: [mongod]
+    command: [--shardsvr, --replSet, shard1, --port, "27017", --bind_ip_all]
+    environment:
+      RS_NAME: shard1
+      RS_HOST: shard1:27017
+    volumes:
+      - ./scripts:/scripts:ro
+  mongos:
+    build:
+      context: ../..
+      dockerfile: e2e-tests/router-lookup/Dockerfile
+      args:
+        MONGO_IMAGE: ${MONGO_IMAGE:-mongodb/mongodb-community-server:9.0-ubi9}
+    command:
+      - --configdb
+      - csrs/config:27017
+      - --port
+      - "27017"
+      - --bind_ip_all
+      - --setParameter
+      - featureFlagExtensionsAPI=true
+      - --setParameter
+      - featureFlagExtensionsApiSignatureValidation=false
+      - --extensionsConfigPath
+      - /etc/mongo/extensions
+      - --loadExtensions
+      - router_lookup
+    volumes:
+      - ./scripts:/scripts:ro

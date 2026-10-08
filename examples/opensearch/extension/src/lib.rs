@@ -77,6 +77,7 @@ static VECTOR_SEARCH_OPS: SourceOps = SourceOps {
     on_extension_initialized: None,
     static_properties_doc: vector_static_properties,
     expand_inner: vector_expand_inner,
+    merging_pipeline: None,
 };
 
 #[no_mangle]

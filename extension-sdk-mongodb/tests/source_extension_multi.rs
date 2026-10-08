@@ -92,6 +92,7 @@ static OPS_A: SourceOps = SourceOps {
     on_extension_initialized: None,
     static_properties_doc: static_props,
     expand_inner: expand_self,
+    merging_pipeline: None,
 };
 
 static OPS_B: SourceOps = SourceOps {
@@ -103,6 +104,7 @@ static OPS_B: SourceOps = SourceOps {
     on_extension_initialized: None,
     static_properties_doc: static_props,
     expand_inner: expand_self,
+    merging_pipeline: None,
 };
 
 #[test]
