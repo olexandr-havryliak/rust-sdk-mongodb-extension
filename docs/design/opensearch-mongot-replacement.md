@@ -1,184 +1,144 @@
-# OpenSearch-backed mongot replacement design
+# OpenSearch-backed Vector Search Design
 
-This document describes the current proof-of-concept design for replacing the
-`mongot` search path with an OpenSearch-backed MongoDB extension and an external
-synchronization pipeline.
+The Rust SDK for MongoDB Extensions PoC currently targets only `$vectorSearch`.
+The earlier combined text/vector and custom Python sink design has been replaced.
+`$search` is not registered. This document records the current design rather
+than the original implementation plan; runnable commands and diagrams live in
+the implementation documentation linked below.
 
-The runnable demo instructions are in
-[`examples/opensearch/README.md`](../../examples/opensearch/README.md).
-See [ARCHITECTURE.md](../../examples/opensearch/ARCHITECTURE.md) for component
-diagrams and [INDEXER.md](../../examples/opensearch/INDEXER.md) for
-consumer behavior and the current HA/FT limitations.
+## Decisions
 
-## Goals
+- MongoDB remains the document source of truth; no MongoDB search/vector index
+  or search-specific collection metadata is created.
+- MongoDB Kafka Source uses `startup.mode=copy_existing` and change streams.
+- Aiven OpenSearch Sink 3.2.0 handles synchronization without a custom consumer.
+- Kafka sink SMT configuration selects only flat, non-empty text fields to
+  vectorize. Projection happens before OpenSearch receives the document;
+  Kafka still retains the full MongoDB source payload.
+- Index/topic naming is `mongodb.<database>.<collection>`; one OpenSearch
+  template matching `mongodb.*` provides automatic vector mappings.
+- A generic Painless ingest adapter uses the standard OpenSearch embedding
+  processor, creates `<field>_embedding`, and removes original text.
+- OpenSearch's deployed `huggingface/sentence-transformers/paraphrase-MiniLM-L3-v2`
+  model (version 1.0.2, ONNX, 384 dimensions) embeds documents and text queries.
+  The shared search pipeline supplies its default ID; clients do not pass a
+  model ID or generate query vectors.
+- The extension queries by original field path, emits IDs and score metadata,
+  and expands to MongoDB host ID lookup for complete source documents.
+- The default Docker stand has one Connect worker, one source task, one sink
+  task, and one topic partition. Runtime additions use a separate connector
+  pair and one-partition topic per namespace. No TLS/auth or infrastructure
+  HA is implemented in this stand.
 
-- Reproduce the first useful subset of `mongot` behavior for `$search` and
-  `$vectorSearch`.
-- Keep MongoDB free of search/vector index definitions; search indexes live in
-  OpenSearch.
-- Preserve each MongoDB `_id` as canonical JSON in the OpenSearch document `_id`, so distinct BSON types stay distinct keys.
-- Derive the OpenSearch index name from the MongoDB namespace.
-- Return full MongoDB documents by combining OpenSearch candidate results with
-  MongoDB host ID lookup.
-- Keep the local proof of concept Docker-only and unauthenticated.
-- Leave room for high availability by allowing multiple OpenSearch endpoints in
-  extension config and by using Kafka/OpenSearch as separately scalable systems.
+## Separate Data and Query Flows
 
-## Architecture
+The architecture is shown as two vertical diagrams in
+[ARCHITECTURE.md](../../examples/opensearch/ARCHITECTURE.md#components):
 
-```text
-MongoDB collection
-  -> MongoDB Kafka Source Connector
-  -> Kafka topic named after the MongoDB namespace
-  -> Python indexing service
-  -> OpenSearch index named after the MongoDB namespace
+1. **CRUD synchronization:** MongoDB -> MongoDB Kafka Source -> Kafka -> Aiven
+   OpenSearch Sink -> embedding pipeline/model -> vector-only index. Inserts,
+   updates, and replacements write complete projected documents and re-embed
+   their text. Keyed delete events become OpenSearch DELETE requests and bypass
+   embedding. Synchronization is eventually consistent; a few seconds of delay
+   between a MongoDB write and searchable vectors is acceptable.
+2. **Aggregation pipeline:** a client submits `$vectorSearch` with `path`, text
+   `query`, optional `limit`, and an optional OpenSearch-DSL `filter`. The extension
+   derives the namespace index and queries `<path>_embedding`. OpenSearch returns
+   IDs and scores; MongoDB's `$_internalSearchIdLookup` fetches full documents.
+   `$set` or `$project` exposes `$meta: "vectorSearchScore"` in client results.
 
-MongoDB aggregation
-  -> Rust extension stage ($search or $vectorSearch)
-  -> OpenSearch query
-  -> candidate rows: { _id, $searchScore }
-  -> host-created $_internalSearchIdLookup
-  -> full MongoDB documents
-```
+## Demo Data and Namespaces
 
-The example stack uses:
+The default namespace is `search_demo.products` with 20 seeded products. The
+optional on-the-fly example is `catalog.articles` with two documents; its
+connectors are not registered by default. Both use only these document fields:
 
-- `mongodb/mongodb-community-server:9.0-ubi9`
-- MongoDB Kafka Source Connector with `startup.mode=copy_existing`
-- Kafka
-- OpenSearch 2.x with ML Commons enabled
-- OpenSearch Dashboards for manual inspection
-- one Rust shared library, `libopensearch_extension.so`
+| Field | MongoDB | OpenSearch |
+| --- | --- | --- |
+| `_id` | String document ID | Same document ID, not a projected source field |
+| `title` | Original text; returned in aggregation results | Not indexed or stored |
+| `description` | Original text | Only `description_embedding`, a 384-component `knn_vector` |
 
-## Synchronization
+The embedding pipeline remains generic: additional flat text fields can be
+selected through Kafka sink configuration without per-field pipeline changes.
+The demo indexes only `description`, so queries use `path: "description"`.
+Seed scripts use repeatable replacement upserts, not collection drops.
 
-The connector publishes full MongoDB documents to Kafka. The indexing service:
+## Connector Lifecycle
 
-1. reads namespace-specific Kafka topics;
-2. creates OpenSearch mappings from `config/indexing.yml`;
-3. creates ingest and search pipelines for autoembeddings when a model ID is
-   available;
-4. projects only configured fields into OpenSearch;
-5. writes OpenSearch documents using the canonical JSON of MongoDB `_id` as OpenSearch `_id`;
-6. handles inserts, replacements, updates, and deletes.
+Namespaces can be added without rebuilding images or restarting the worker.
+Create a one-partition topic, register the sink, then register a fresh source
+for that namespace through Kafka Connect REST API. The existing `mongodb.*`
+template automatically configures the new index on its first write; no new
+model, mapping, or extension registration is required.
 
-`publish.full.document.only=true` makes update events carry a full document, so
-updates are handled as full reindex operations. This intentionally matches the
-desired mongot-like behavior for the proof of concept.
+`PUT /connectors/{name}/config` creates or updates a connector using its complete
+configuration. Configuration persists in Kafka's internal topics; updates may
+restart tasks or trigger a rebalance. Changing selected fields does not reindex
+already consumed documents. Projection/model changes require a coordinated
+rebuild for a consistent index.
 
-See [`examples/opensearch/SYNC.md`](../../examples/opensearch/SYNC.md) for the
-operational details.
+Use a fresh source name for a new namespace: `copy_existing` applies when there
+is no source offset. Expanding an existing connector's namespace selection does
+not guarantee an initial copy. Topic routing and the initial-copy regex do not
+replace the source's database/collection change-stream selection.
 
-## Index Configuration
+**Deleting connectors intentionally retains the OpenSearch index and documents.**
+It does not delete MongoDB data or Kafka topics, and is not an offset reset.
+Deleting both connectors stops this synchronization path, although submitted
+writes can still finish. Removing only the source lets the sink drain queued
+events; removing only the sink lets the source continue publishing. Recreating
+a connector with the same name must not be treated as a guaranteed fresh copy.
 
-`config/indexing.yml` maps MongoDB namespaces to OpenSearch indexes and field
-behavior.
+Commands, optional configurations, and operational caveats are in
+[CONNECTOR-LIFECYCLE.md](../../examples/opensearch/CONNECTOR-LIFECYCLE.md).
 
-Supported field tags:
+## Delivery and HA Boundaries
 
-| Tag | Behavior |
-| --- | --- |
-| `search` | Create a text field for OpenSearch `match` queries. |
-| `vectorSearch` | Create a source text field plus `<field>_embedding` as a `knn_vector`. |
-| `filter` | Create a scalar field for filtering. |
-| `sort` | Keep scalar mapping suitable for sorting. |
+Delivery is at least once. Kafka ordering is per partition, not global FIFO.
+Full replacement and offset-based external versions reject older/duplicate
+live-document writes; they do not make MongoDB/Kafka/OpenSearch transactional.
+Physical deletes retain their version fence only temporarily, so an old replay
+can later resurrect a deleted document. Permanent delete fences and topic
+UUID/configuration/model identity validation from the custom sink are absent.
+Do not independently recreate topics or reset offsets against a retained index.
+Collection/database DDL, including `drop`, is not supported by this PoC.
 
-The proof of concept currently creates mappings in the indexing service. That
-keeps MongoDB free of search index metadata while allowing the Kafka/OpenSearch
-side to own indexing concerns.
+Additional distributed Connect workers can reassign a single active task within
+the same group. They require shared internal topics/plugins and distinct
+reachable REST addresses; source and sink tasks can have different owners.
+Infrastructure HA additionally needs replicated Kafka/internal topics,
+OpenSearch replicas, MongoDB replication, durable storage, and independent
+failure domains. Current tests verify worker restart recovery, not multi-node
+HA or permanent stale-write safety.
 
-## Extension API Surface
-
-The SDK now supports registering multiple source stages from one shared library.
-The OpenSearch extension uses that to register:
-
-- `$search`
-- `$vectorSearch`
-
-Both stages parse a user-friendly shape:
-
-```javascript
-{ $search: { path: "description", query: "waterproof shell", limit: 5 } }
-{ $vectorSearch: { path: "description", query: "warm sleep system", limit: 5 } }
-```
-
-The extension derives the OpenSearch index from the MongoDB catalog namespace.
-It sends the OpenSearch request, emits candidate documents shaped like
-`{ _id, $searchScore }`, and expands to a host-created
-`$_internalSearchIdLookup` stage so MongoDB restores fresh full documents.
-
-The extension emits score metadata for the candidate rows. MongoDB 9.0 host ID
-lookup restores full documents and preserves scores for downstream
-`$meta: "searchScore"` / `$meta: "vectorSearchScore"` projection. Both search
-stages declare `requiresInputDocSource: false` to generate candidates from
-OpenSearch rather than passing through a collection scan.
-
-## OpenSearch Queries
-
-`$search` sends a native OpenSearch text query:
-
-- `match` on the requested field;
-- optional raw OpenSearch filter document;
-- `_source: false`;
-- result score copied into `$searchScore`.
-
-`$vectorSearch` sends a native OpenSearch neural query:
-
-- target field is `<path>_embedding`;
-- query input is `query_text`;
-- the query omits `model_id`;
-- OpenSearch supplies the model through the configured search pipeline.
-
-## Extension Config
-
-The extension options contain only OpenSearch endpoints. The host config nests
-them under `extensionOptions`:
-
-```yaml
-sharedLibraryPath: /usr/local/lib/mongo-extensions/libopensearch_extension.so
-extensionOptions:
-  endpoints: http://opensearch:9200,http://opensearch-2:9200
-```
-
-The extension tries endpoints in order with short request timeouts. If all
-endpoints fail, the stage returns an error instead of hanging on connection
-timeouts.
-
-## Demo Data
-
-The demo uses a stable synthetic outdoor retail catalog in
-[`examples/opensearch/datasets/outdoor-products.json`](../../examples/opensearch/datasets/outdoor-products.json).
-The dataset is small enough for deterministic tests and realistic enough for
-manual search/vector-search demos.
-
-## Current Limits
-
-- Docker-only proof of concept.
-- Single-node OpenSearch in the local compose stack.
-- No TLS/auth in Docker.
-- No production hardening for OpenSearch security, Kafka ACLs, or connector
-  credentials.
-- `$search` supports text query and an optional raw filter.
-- `$vectorSearch` supports text-to-vector neural query, optional raw filter, and
-  OpenSearch-side scoring.
-- Score metadata is preserved through host `$_internalSearchIdLookup` and can
-  be projected with `$meta`.
-- Advanced Atlas Search semantics are intentionally outside the current subset.
+The extension accepts multiple OpenSearch endpoints and tries them with bounded
+request timeouts. Failure of every endpoint returns an error. Background
+heartbeats are not implemented. See [CONNECTOR.md](../../examples/opensearch/CONNECTOR.md)
+for detailed ordering and recovery limits.
 
 ## Verification
 
-Primary checks:
+Docker-only tests cover configuration/dataset shape, repeatable demo scripts,
+real-model vectorization and text removal, CRUD propagation, full MongoDB
+documents/scores, same-offset replay, and Connect outage recovery. Connector
+lifecycle tests additionally exercise runtime creation, source/sink updates,
+and retained OpenSearch data with no subsequent propagation after deletion.
+Test resources are isolated and cleaned up; they do not certify production HA.
 
-```bash
-./e2e-tests/run-sdk-tests-docker.sh
-./e2e-tests/run-e2e.sh
-./examples/opensearch/run-demo.sh test
-./examples/opensearch/run-demo.sh query
-```
+## Implementation Documentation
 
-The demo stack is intentionally left inspectable with:
+- [README](../../examples/opensearch/README.md): complete runnable demo and tests.
+- [Architecture](../../examples/opensearch/ARCHITECTURE.md): components, automatic
+  mappings, deployed model, default-query-model setup, and separate vertical
+  CRUD synchronization and aggregation pipeline diagrams.
+- [Synchronization](../../examples/opensearch/SYNC.md): source/sink configuration,
+  namespace routing, and field selection.
+- [Connector](../../examples/opensearch/CONNECTOR.md): processing, ordering,
+  recovery, accepted stale-write risk, and requirements for future HA work.
+- [Connector lifecycle](../../examples/opensearch/CONNECTOR-LIFECYCLE.md): runtime
+  creation, updates, deletion, and the optional namespace demo.
 
-```bash
-./examples/opensearch/run-demo.sh up
-./examples/opensearch/run-demo.sh logs
-```
+The shared OpenSearch template/pipelines/model are bootstrapped once from
+declarative files. Per-namespace and field selection configuration lives in
+Kafka Connect. Registering ML resources entirely inside Kafka is not implemented.

@@ -1,3 +1,11 @@
 FROM confluentinc/cp-kafka-connect-base:7.8.0
 
 RUN confluent-hub install --no-prompt mongodb/kafka-connect-mongodb:latest
+
+ARG OPENSEARCH_CONNECTOR_VERSION=3.2.0
+RUN curl -fL --retry 3 \
+      "https://github.com/Aiven-Open/opensearch-connector-for-apache-kafka/releases/download/v${OPENSEARCH_CONNECTOR_VERSION}/opensearch-connector-for-apache-kafka-${OPENSEARCH_CONNECTOR_VERSION}.tar" \
+      -o /tmp/opensearch-connector.tar \
+    && mkdir -p /usr/share/confluent-hub-components/aiven-opensearch \
+    && tar -xf /tmp/opensearch-connector.tar -C /usr/share/confluent-hub-components/aiven-opensearch \
+    && rm /tmp/opensearch-connector.tar

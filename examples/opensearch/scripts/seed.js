@@ -5,7 +5,12 @@ const datasetPath = "/datasets/outdoor-products.json";
 const fs = require("fs");
 const productsDataset = JSON.parse(fs.readFileSync(datasetPath, "utf8"));
 
-products.drop();
-products.insertMany(productsDataset);
+products.bulkWrite(productsDataset.map((document) => ({
+  replaceOne: {
+    filter: { _id: document._id },
+    replacement: document,
+    upsert: true,
+  },
+})));
 
 printjson({ seeded: products.countDocuments(), datasetPath });

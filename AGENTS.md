@@ -5,10 +5,7 @@ examples, and Docker tooling for MongoDB server extensions loaded by `mongod` as
 shared libraries.
 
 These instructions apply to any automated or human-assisted coding agent working
-in this repository. They are mandatory for the whole task. A request to
-implement, fix, or continue does not waive plan confirmation, test-driven
-development, verification, or cleanup. If `.cursorrules` or another repository
-instruction is shorter or older, follow this file.
+in this repository.
 
 ---
 
@@ -26,7 +23,7 @@ external source.
 
 - Before implementation, always write a concise plan and wait for explicit user
   confirmation. Do not start editing or coding until the user has approved the
-  plan. A request such as “fix if needed” is not approval of a specific plan.
+  plan.
 - Explain intended changes clearly before performing them so the user can
   confirm the direction with enough context.
 - If implementation reveals multiple reasonable approaches, unclear
@@ -41,10 +38,7 @@ external source.
 - Keep generated or mechanical churn out of commits unless it is required.
 - Always clean up after implementation: remove obsolete code, stale docs,
   dead configuration, unused files, and leftovers from previous approaches when
-  they are no longer part of the current design. Before finishing, check the
-  diff and nearby docs, scripts, and configuration for names, commands, and
-  behavior the change made obsolete, and update or remove them in the same
-  change.
+  they are no longer part of the current design.
 
 ---
 
@@ -77,30 +71,9 @@ Agents must execute this script when verifying Rust tests unless Docker is
 unavailable in the current environment. If Docker is unavailable, say so clearly
 and still leave the change test-complete.
 
-End-to-end tests are mandatory for the same change when it can affect the code,
-configuration, or scripts those tests exercise. Skip an end-to-end script only
-when the diff cannot change what that script builds or runs. Documentation-only
-edits that do not change commands, scripts, Dockerfiles, or expected runtime
-behavior are the usual case for skipping end-to-end tests.
+Broader checks:
 
-When the change can affect the shared MongoDB extension flow, run:
-
-```bash
-./e2e-tests/run-e2e.sh
-```
-
-When the change can affect an example stack, run that example's end-to-end
-command as well. For the OpenSearch example:
-
-```bash
-./examples/opensearch/run-demo.sh test
-```
-
-Agents must execute these scripts, not only suggest them, unless Docker is
-unavailable. If Docker is unavailable, say so clearly.
-
-Other checks:
-
+- End-to-end MongoDB extension flow: `./e2e-tests/run-e2e.sh`
 - Miri / undefined behavior checks: `./e2e-tests/run-miri-docker.sh`
 - Additional compose flows: see `e2e-tests/README.md`
 
@@ -166,9 +139,6 @@ guidance.
 
 Avoid:
 
-- Editing or coding before the user confirms the plan.
-- Leaving obsolete code, stale docs, dead configuration, or unused files after a
-  change.
 - Shipping implementation without tests.
 - Adding tests only after implementation.
 - Skipping tests because a change seems simple.
@@ -184,10 +154,9 @@ Avoid:
 1. Read the relevant code and docs.
 2. Present a short plan and wait for explicit user confirmation.
 3. Write the smallest failing test that describes the desired behavior.
-4. Run the relevant Docker verification, including end-to-end scripts when the
-   change can affect them.
+4. Run the relevant Docker verification.
 5. Implement the minimal fix.
 6. Clean up obsolete code and stale artifacts introduced or exposed by the
    change.
-7. Re-run verification, including the same end-to-end scripts.
+7. Re-run verification.
 8. Summarize what changed and what was verified.

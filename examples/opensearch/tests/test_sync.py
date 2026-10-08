@@ -1,7 +1,6 @@
-import json
-import sys
+import math
 import time
-from urllib.parse import quote
+import unittest
 
 import requests
 from pymongo import MongoClient
@@ -10,237 +9,152 @@ from pymongo import MongoClient
 MONGO_URI = "mongodb://mongo:27017/?replicaSet=rs0"
 CONNECT_URL = "http://connect:8083"
 OPENSEARCH_URL = "http://opensearch:9200"
-INDEX = "search_demo.products"
+INDEX = "mongodb.search_demo.products"
 
 
-def wait_until(label, predicate, timeout=120, interval=2):
-    deadline = time.time() + timeout
+def wait_until(label, predicate, timeout=180):
+    deadline = time.monotonic() + timeout
     last_error = None
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         try:
             if predicate():
                 return
         except Exception as exc:
             last_error = exc
-        time.sleep(interval)
+        time.sleep(1)
     raise AssertionError(f"timed out waiting for {label}; last error: {last_error}")
 
 
-def os_get(path):
-    response = requests.get(f"{OPENSEARCH_URL}{path}", timeout=10)
+def os_request(method, path, body=None):
+    response = requests.request(method, OPENSEARCH_URL + path, json=body, timeout=30)
     response.raise_for_status()
     return response.json()
-
-
-def os_post(path, body):
-    response = requests.post(f"{OPENSEARCH_URL}{path}", json=body, timeout=10)
-    response.raise_for_status()
-    return response.json()
-
-
-def opensearch_id(mongo_id):
-    return json.dumps(mongo_id, separators=(",", ":"), sort_keys=True)
 
 
 def os_doc(document_id):
-    encoded = quote(document_id, safe="")
-    response = requests.get(f"{OPENSEARCH_URL}/{INDEX}/_doc/{encoded}", timeout=10)
+    response = requests.get(f"{OPENSEARCH_URL}/{INDEX}/_doc/{document_id}", timeout=10)
     if response.status_code == 404:
         return None
     response.raise_for_status()
     return response.json()
 
 
-def assert_doc(document_id, predicate, label):
-    wait_until(label, lambda: (doc := os_doc(document_id)) is not None and predicate(doc["_source"]))
-
-
-def connector_running():
-    status = requests.get(f"{CONNECT_URL}/connectors/mongo-products-source/status", timeout=10)
+def connector_running(name):
+    status = requests.get(f"{CONNECT_URL}/connectors/{name}/status", timeout=10)
     if status.status_code != 200:
         return False
     payload = status.json()
-    return (
-        payload["connector"]["state"] == "RUNNING"
-        and all(task["state"] == "RUNNING" for task in payload.get("tasks", []))
-    )
+    return (payload["connector"]["state"] == "RUNNING" and bool(payload.get("tasks"))
+            and all(task["state"] == "RUNNING" for task in payload["tasks"]))
 
 
-def main():
-    wait_until("MongoDB source connector", connector_running, timeout=180)
-    wait_until("OpenSearch index", lambda: requests.head(f"{OPENSEARCH_URL}/{INDEX}", timeout=10).status_code == 200)
+class SyncTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.mongo = MongoClient(MONGO_URI, serverSelectionTimeoutMS=10000)
+        cls.products = cls.mongo.search_demo.products
+        for name in ("mongo-products-source", "opensearch-products-sink"):
+            wait_until(name, lambda name=name: connector_running(name))
+        wait_until("initial copy", lambda: os_doc("p001") is not None)
 
-    mapping = os_get(f"/{INDEX}/_mapping")[INDEX]["mappings"]["properties"]
-    assert mapping["name"]["type"] == "text"
-    assert mapping["description"]["type"] == "text"
-    assert mapping["description_embedding"]["type"] == "knn_vector"
-    assert mapping["category"]["type"] == "keyword"
-    assert mapping["price"]["type"] == "float"
-    assert mapping["inStock"]["type"] == "boolean"
-    assert mapping["updatedAt"]["type"] == "date"
+    @classmethod
+    def tearDownClass(cls):
+        cls.mongo.close()
 
-    assert_doc(
-        opensearch_id("p001"),
-        lambda source: source["name"] == "Alpine Trail Pack 32L"
-        and len(source.get("description_embedding", [])) == 384,
-        "copy_existing p001 with embedding",
-    )
-    wait_until(
-        "neural query without model_id",
-        lambda: bool(
-            os_post(
-                f"/{INDEX}/_search",
-                {
-                    "size": 1,
-                    "_source": False,
-                    "query": {
-                        "neural": {
-                            "description_embedding": {
-                                "query_text": "waterproof hiking backpack",
-                                "k": 1,
-                            }
-                        }
-                    },
-                },
-            )["hits"]["hits"]
-        ),
-    )
-    assert_doc(opensearch_id("p007"), lambda source: source["category"] == "camp-kitchen", "copy_existing p007")
+    def assert_vectors(self, source, fields=("description",)):
+        self.assertEqual(set(source), {f + "_embedding" for f in fields})
+        for vector in source.values():
+            self.assertEqual(len(vector), 384)
+            self.assertTrue(all(isinstance(x, (int, float)) and math.isfinite(x) for x in vector))
 
-    mongo = MongoClient(MONGO_URI)
-    products = mongo.search_demo.products
+    def test_initial_copy_and_global_mapping(self):
+        wait_until("all seed documents", lambda: all(os_doc(f"p{i:03}") for i in range(1, 21)))
+        self.assert_vectors(os_doc("p001")["_source"])
+        mapping = os_request("GET", f"/{INDEX}/_mapping")[INDEX]["mappings"]["properties"]
+        self.assertEqual(set(mapping), {"description_embedding"})
+        for field in mapping.values():
+            self.assertEqual(field["type"], "knn_vector")
+            self.assertEqual(field["dimension"], 384)
+        templates = os_request("GET", "/_index_template/mongodb-vectors")["index_templates"]
+        self.assertEqual(templates[0]["index_template"]["index_patterns"], ["mongodb.*"])
 
-    def assert_search_document(document_id, query):
-        expected = products.find_one({"_id": document_id})
-        for stage, metadata in (("$search", "searchScore"), ("$vectorSearch", "vectorSearchScore")):
-            def matches():
-                hits = list(products.aggregate([{stage: {
-                    "path": "description", "query": query, "limit": 1,
-                    "filter": {"ids": {"values": [opensearch_id(document_id)]}},
-                }}]))
-                return hits == [expected]
+    def test_insert_update_replace_delete_and_reinsert(self):
+        key = "sync-vector-probe"
+        self.products.delete_one({"_id": key})
+        wait_until("probe cleanup", lambda: os_doc(key) is None)
+        try:
+            self.products.insert_one({"_id": key, "title": "Hiking pack", "description": "A red backpack"})
+            wait_until("insert", lambda: os_doc(key) is not None)
+            first = os_doc(key)
+            self.assert_vectors(first["_source"])
+            self.products.update_one({"_id": key}, {"$set": {"description": "A warm sleeping bag"}})
+            wait_until("new embedding", lambda: os_doc(key)["_source"]["description_embedding"]
+                       != first["_source"]["description_embedding"])
+            updated = os_doc(key)
+            self.assertGreater(updated["_version"], first["_version"])
+            self.products.update_one({"_id": key}, {"$set": {"title": "Not indexed"}})
+            wait_until("title update processed", lambda: os_doc(key)["_version"] > updated["_version"])
+            self.assertEqual(os_doc(key)["_source"], updated["_source"])
+            self.products.replace_one({"_id": key}, {"_id": key, "title": "Only a title"})
+            wait_until("replace removes old fields", lambda: os_doc(key)["_source"] == {})
+            self.products.delete_one({"_id": key})
+            wait_until("physical delete", lambda: os_doc(key) is None)
+            self.products.insert_one({"_id": key, "description": "Same ID, new document"})
+            wait_until("same ID reinsert", lambda: os_doc(key) is not None)
+            self.assert_vectors(os_doc(key)["_source"], ("description",))
+        finally:
+            self.products.delete_one({"_id": key})
+            wait_until("probe removed", lambda: os_doc(key) is None)
 
-            wait_until(f"{stage} restores the filtered MongoDB document {document_id}", matches, timeout=30)
-            scores = list(products.aggregate([
-                {stage: {
-                    "path": "description", "query": query, "limit": 1,
-                    "filter": {"ids": {"values": [opensearch_id(document_id)]}},
-                }},
-                {"$project": {"_id": 1, "score": {"$meta": metadata}}},
-            ]))
-            assert len(scores) == 1 and scores[0]["_id"] == document_id
-            assert isinstance(scores[0].get("score"), (int, float)) and scores[0]["score"] > 0
+    def test_default_query_model_and_full_mongo_document_with_score(self):
+        body = {"size": 3, "_source": False, "query": {"neural": {
+            "description_embedding": {"query_text": "waterproof backpack", "k": 3}
+        }}}
+        wait_until("default model query", lambda: bool(os_request("POST", f"/{INDEX}/_search", body)["hits"]["hits"]))
+        for path in ("description",):
+            stage = {"$vectorSearch": {"path": path, "query": "camp mug", "limit": 1,
+                                      "filter": {"ids": {"values": ["p007"]}}}}
+            expected = self.products.find_one({"_id": "p007"})
+            wait_until("Mongo host ID lookup", lambda: list(self.products.aggregate([stage])) == [expected])
+            hits = list(self.products.aggregate([stage, {"$set": {"score": {"$meta": "vectorSearchScore"}}}]))
+            self.assertEqual(len(hits), 1)
+            score = hits[0].pop("score")
+            self.assertIsInstance(score, (int, float))
+            self.assertGreater(score, 0)
+            self.assertEqual(hits[0], expected)
 
-    assert_search_document("p007", "camp mug coffee tea")
+    def test_replay_live_records_and_reject_stale_version(self):
+        before = os_doc("p001")
+        response = requests.put(f"{OPENSEARCH_URL}/{INDEX}/_doc/p001",
+                                params={"version": before["_version"], "version_type": "external"},
+                                json={"description": "stale data"}, timeout=30)
+        self.assertEqual(response.status_code, 409)
+        base = f"{CONNECT_URL}/connectors/opensearch-products-sink"
 
-    def assert_ranked_documents(stage, metadata, query):
-        stage_spec = {"path": "description", "query": query, "limit": 3}
+        def checkpoint():
+            response = requests.get(base + "/offsets", timeout=10)
+            response.raise_for_status()
+            return response.json()["offsets"][0]["offset"]["kafka_offset"]
 
-        def ranked():
-            rows = list(products.aggregate([
-                {stage: stage_spec},
-                {"$set": {"score": {"$meta": metadata}}},
-            ]))
-            if len(rows) < 2:
-                return False
-            values = [row.get("score") for row in rows]
-            if not all(isinstance(value, (int, float)) and value > 0 for value in values):
-                return False
-            if values != sorted(values, reverse=True):
-                return False
-            for row in rows:
-                row.pop("score")
-                if row != products.find_one({"_id": row["_id"]}):
-                    return False
-            return True
-
-        wait_until(f"{stage} returns ranked MongoDB documents for {query}", ranked, timeout=30)
-
-    assert_ranked_documents("$search", "searchScore", "waterproof")
-    assert_ranked_documents("$vectorSearch", "vectorSearchScore", "waterproof rain shell")
-
-    products.insert_one(
-        {
-            "_id": "p999",
-            "name": "Rain Jacket",
-            "description": "Waterproof breathable shell for hiking",
-            "category": "outerwear",
-            "price": 149.0,
-            "inStock": True,
-            "updatedAt": "2026-10-02T12:02:00Z",
-            "internalNotes": "do not index",
-        }
-    )
-    assert_doc(
-        opensearch_id("p999"),
-        lambda source: source["name"] == "Rain Jacket" and "internalNotes" not in source,
-        "insert propagation and projection",
-    )
-
-    products.replace_one(
-        {"_id": "p999"},
-        {
-            "_id": "p999",
-            "name": "Storm Jacket",
-            "description": "Waterproof shell with taped seams",
-            "category": "outerwear",
-            "price": 179.0,
-            "inStock": False,
-            "updatedAt": "2026-10-02T12:03:00Z",
-        },
-    )
-    assert_doc(
-        opensearch_id("p999"),
-        lambda source: source["name"] == "Storm Jacket" and source["inStock"] is False,
-        "replace full reindex",
-    )
-
-    products.update_one(
-        {"_id": "p007"},
-        {
-            "$set": {
-                "description": "Updated waterproof day pack",
-                "category": "updated-bags",
-                "updatedAt": "2026-10-02T12:04:00Z",
-            }
-        },
-    )
-    assert_doc(
-        opensearch_id("p007"),
-        lambda source: source["description"] == "Updated waterproof day pack"
-        and source["category"] == "updated-bags",
-        "update full reindex",
-    )
-    assert_search_document("p007", "waterproof day pack")
-
-    products.delete_one({"_id": "p001"})
-    wait_until("delete propagation", lambda: os_doc(opensearch_id("p001"))["_source"].get("_sync_deleted") is True)
-
-    for stage in ("$search", "$vectorSearch"):
-        wait_until(
-            f"{stage} returns no candidates for a deleted document",
-            lambda: not list(products.aggregate([{stage: {
-                "path": "description", "query": "hiking backpack", "limit": 1,
-                "filter": {"ids": {"values": [opensearch_id("p001")]}},
-            }}])),
-            timeout=30,
-        )
-
-    p007 = os_doc(opensearch_id("p007"))
-    assert p007["_id"] == opensearch_id("p007")
-    assert p007["_source"]["_mongo_namespace"] == INDEX
-
-    count = os_post(f"/{INDEX}/_count", {
-        "query": {"bool": {"must_not": [{"term": {"_sync_deleted": True}}]}}
-    })["count"]
-    assert count == 20, f"expected 20 indexed documents after insert/delete, got {count}"
-
-    print("OpenSearch demo sync tests passed")
+        wait_until("committed sink offset", lambda: checkpoint() > before["_version"])
+        committed = checkpoint()
+        requests.put(base + "/stop", timeout=10).raise_for_status()
+        try:
+            wait_until("stopped sink", lambda: requests.get(base + "/status", timeout=10)
+                       .json()["connector"]["state"] == "STOPPED")
+            requests.patch(base + "/offsets", json={"offsets": [{
+                "partition": {"kafka_topic": INDEX, "kafka_partition": 0},
+                "offset": {"kafka_offset": 0},
+            }]}, timeout=30).raise_for_status()
+        finally:
+            requests.put(base + "/resume", timeout=10).raise_for_status()
+        wait_until("sink resumed", lambda: connector_running("opensearch-products-sink"))
+        wait_until("same offsets replayed", lambda: checkpoint() >= committed)
+        after = os_doc("p001")
+        self.assertEqual(before["_version"], after["_version"])
+        self.assertEqual(before["_source"], after["_source"])
+        wait_until("replayed deleted probe is absent", lambda: os_doc("sync-vector-probe") is None)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as exc:
-        print(f"OpenSearch demo sync tests failed: {exc}", file=sys.stderr)
-        sys.exit(1)
+    unittest.main(verbosity=2)

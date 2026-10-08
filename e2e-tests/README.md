@@ -1,9 +1,11 @@
 # Tests and integration harness
 
-This tree builds and runs **automated checks** for the workspace: **Rust unit and integration tests** (often in Docker), **end-to-end** checks against a real **`mongod`**, optional **aggregation fuzz**, and **Miri** over FFI-heavy tests in the **Rust SDK for MongoDB Extensions** (`extension-sdk-mongodb`).
+This tree builds and runs **automated checks** for the workspace: **Rust unit and integration tests** (often in Docker), **end-to-end** smoke checks against a real **`mongod`** with the OpenSearch extension loaded, optional **aggregation fuzz**, and **Miri** over FFI-heavy tests in the **Rust SDK for MongoDB Extensions** (`extension-sdk-mongodb`).
 
-The Docker e2e image loads the OpenSearch `$search` / `$vectorSearch` extension
-together with `$rustSdkE2e`, `$fibonacci`, and `$readLocalJsonl`.
+The Docker e2e image is intentionally focused on the current OpenSearch-backed
+`$vectorSearch` PoC. Older example extensions such as Fibonacci and
+Data federation remain in the repository as examples, but are not loaded into
+this image.
 
 ---
 
@@ -20,7 +22,7 @@ Extensions are **Linux-only** in upstream MongoDB; these scripts default to the 
 
 ### Extension `cdylib` (workspace crates)
 
-- **E2E image**: [`Dockerfile`](Dockerfile) uses the **repository root** as Docker build context. It compiles **`opensearch_extension`**, **`e2e_extension`**, **`fibonacci_extension`**, and **`data_federation_extension`**, then writes their extension configs under **`/etc/mongo/extensions`**.
+- **E2E image**: [`Dockerfile`](Dockerfile) uses the **repository root** as Docker build context. It compiles **`opensearch_extension`** into one shared library, then writes its extension config under **`/etc/mongo/extensions`**.
   Trigger a build with **`./e2e-tests/run-e2e.sh`** or by running Compose **up --build** (see **Executing**).
 
 ### Rust crates without a full Mongo stack
@@ -51,7 +53,7 @@ Override the toolchain image: **`RUST_TEST_IMAGE=my-registry/rust:nightly ./e2e-
 
 ### End-to-end: `mongod` + `mongosh` scripts
 
-Builds the e2e image, starts **`mongod`** from **`mongodb/mongodb-community-server:9.0-ubi9`** with **`featureFlagExtensionsAPI`**, **`--extensionsConfigPath /etc/mongo/extensions`**, and **`--loadExtensions opensearch,e2e,fibonacci,datafederation`**. It runs a load smoke test for **`$search`** and **`$vectorSearch`**, then successful aggregations for **`$rustSdkE2e`**, **`$fibonacci`**, and **`$readLocalJsonl`**. The OpenSearch smoke test expects connection errors because this stack does not start OpenSearch; that still verifies that MongoDB loaded and registered those stages. The local test libraries are unsigned, so the harness also sets **`featureFlagExtensionsApiSignatureValidation=false`**; production deployments should use the server’s expected signing/validation flow.
+Builds the e2e image, starts **`mongod`** from **`mongodb/mongodb-community-server:9.0-ubi9`** with **`featureFlagExtensionsAPI`**, **`--extensionsConfigPath /etc/mongo/extensions`**, and **`--loadExtensions opensearch`**, then runs a load smoke test for **`$vectorSearch`**. The smoke test expects OpenSearch connection errors because this minimal e2e stack does not start OpenSearch; that still verifies that MongoDB loaded and registered the extension stage instead of rejecting it as unknown. The local test library is unsigned, so the harness also sets **`featureFlagExtensionsApiSignatureValidation=false`**; production deployments should use the server’s expected signing/validation flow.
 
 ```bash
 chmod +x e2e-tests/run-e2e.sh
@@ -66,7 +68,7 @@ MONGO_IMAGE=mongodb/mongodb-community-server:9.0-ubi9 ./e2e-tests/run-e2e.sh
 
 ### Random aggregation fuzz (Docker + live `mongod`)
 
-Sends bounded random pipelines over every extension loaded by the shared image: **`$search`**, **`$vectorSearch`**, **`$fibonacci`**, **`$readLocalJsonl`**, and **`$rustSdkE2e`**. Local stages use arguments that can execute, including the JSONL fixtures mounted at **`/federation-data`**. Occasionally appends **`$match`**, **`$limit`**, or **`$project`**. Not LLVM libFuzzer; uses **`maxTimeMS`** per aggregate and alternates empty vs non-empty collections. The stack does not start OpenSearch, so connection errors from the search stages are expected. The job fails when no aggregation succeeds.
+Sends bounded random pipelines starting with **`$vectorSearch`** (same stack and extension as e2e). Occasionally appends **`$match`** / **`$project`**. Not LLVM libFuzzer; uses **`maxTimeMS`** per aggregate and alternates empty vs non-empty collections.
 
 ```bash
 chmod +x e2e-tests/run-fuzz-e2e.sh

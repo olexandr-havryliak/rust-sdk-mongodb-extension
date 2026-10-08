@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# MongoDB 9.0 + OpenSearch-backed $search / $vectorSearch extension PoC.
+# MongoDB 9.0 + OpenSearch-backed $vectorSearch extension PoC.
 ARG MONGO_IMAGE=mongodb/mongodb-community-server:9.0-ubi9
 
 FROM rust:bookworm AS builder

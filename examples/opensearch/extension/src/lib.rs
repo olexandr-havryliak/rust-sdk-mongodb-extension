@@ -4,41 +4,10 @@ use bson::{Bson, Document};
 use extension_sdk_mongodb::source_stage::{get_multi_source_extension_impl, SourceOps};
 use extension_sdk_mongodb::{ExtensionResult, Next, SourceStage, StageContext};
 use opensearch_extension_core::{
-    id_lookup_expansion, next_result, open_state, parse_search_args, parse_vector_search_args,
-    QueryArgs, SearchState,
+    id_lookup_expansion, next_result, open_state, parse_vector_search_args, QueryArgs, SearchState,
 };
 
-struct OpenSearchSearch;
 struct OpenSearchVectorSearch;
-
-impl SourceStage for OpenSearchSearch {
-    const NAME: &'static str = "$search";
-    type Args = QueryArgs;
-    type State = SearchState;
-
-    fn parse(args: Document) -> ExtensionResult<Self::Args> {
-        parse_search_args(args)
-    }
-
-    fn expand(args: &Self::Args) -> extension_sdk_mongodb::Expansion {
-        id_lookup_expansion(Self::NAME, args)
-    }
-
-    fn properties() -> extension_sdk_mongodb::StageProperties {
-        extension_sdk_mongodb::StageProperties {
-            requires_input: false,
-            ..extension_sdk_mongodb::StageProperties::source_stage_default()
-        }
-    }
-
-    fn open(args: Self::Args, ctx: &mut StageContext) -> ExtensionResult<Self::State> {
-        open_state(args, ctx)
-    }
-
-    fn next(state: &mut Self::State, ctx: &mut StageContext) -> ExtensionResult<Next> {
-        next_result(state, ctx)
-    }
-}
 
 impl SourceStage for OpenSearchVectorSearch {
     const NAME: &'static str = "$vectorSearch";
@@ -69,12 +38,6 @@ impl SourceStage for OpenSearchVectorSearch {
     }
 }
 
-fn search_open(d: Document, ctx: &mut StageContext) -> ExtensionResult<*mut c_void> {
-    let args = OpenSearchSearch::parse(d)?;
-    let state = OpenSearchSearch::open(args, ctx)?;
-    Ok(Box::into_raw(Box::new(state)) as *mut c_void)
-}
-
 fn vector_open(d: Document, ctx: &mut StageContext) -> ExtensionResult<*mut c_void> {
     let args = OpenSearchVectorSearch::parse(d)?;
     let state = OpenSearchVectorSearch::open(args, ctx)?;
@@ -87,21 +50,8 @@ unsafe fn drop_search_state(ptr: *mut c_void) {
     }
 }
 
-unsafe fn search_next(ptr: *mut c_void, ctx: &mut StageContext) -> ExtensionResult<Next> {
-    OpenSearchSearch::next(&mut *(ptr as *mut SearchState), ctx)
-}
-
 unsafe fn vector_next(ptr: *mut c_void, ctx: &mut StageContext) -> ExtensionResult<Next> {
     OpenSearchVectorSearch::next(&mut *(ptr as *mut SearchState), ctx)
-}
-
-fn search_static_properties() -> Document {
-    let mut properties = OpenSearchSearch::properties().to_document();
-    properties.insert(
-        "providedMetadataFields",
-        Bson::Array(vec![Bson::String("searchScore".to_string())]),
-    );
-    properties
 }
 
 fn vector_static_properties() -> Document {
@@ -113,26 +63,10 @@ fn vector_static_properties() -> Document {
     properties
 }
 
-fn search_expand_inner(d: Document) -> ExtensionResult<extension_sdk_mongodb::Expansion> {
-    let args = OpenSearchSearch::parse(d)?;
-    Ok(OpenSearchSearch::expand(&args))
-}
-
 fn vector_expand_inner(d: Document) -> ExtensionResult<extension_sdk_mongodb::Expansion> {
     let args = OpenSearchVectorSearch::parse(d)?;
     Ok(OpenSearchVectorSearch::expand(&args))
 }
-
-static SEARCH_OPS: SourceOps = SourceOps {
-    name: OpenSearchSearch::NAME,
-    expect_empty: false,
-    open_from_doc: search_open,
-    drop_state: drop_search_state,
-    next: search_next,
-    on_extension_initialized: None,
-    static_properties_doc: search_static_properties,
-    expand_inner: search_expand_inner,
-};
 
 static VECTOR_SEARCH_OPS: SourceOps = SourceOps {
     name: OpenSearchVectorSearch::NAME,
@@ -158,12 +92,7 @@ pub unsafe extern "C" fn get_mongodb_extension(
     host_services: *const extension_sdk_mongodb::sys::MongoExtensionHostServices,
     extension_out: *mut *const extension_sdk_mongodb::sys::MongoExtension,
 ) -> *mut extension_sdk_mongodb::sys::MongoExtensionStatus {
-    get_multi_source_extension_impl(
-        &[&SEARCH_OPS, &VECTOR_SEARCH_OPS],
-        version,
-        host_services,
-        extension_out,
-    )
+    get_multi_source_extension_impl(&[&VECTOR_SEARCH_OPS], version, host_services, extension_out)
 }
 
 #[cfg(test)]
@@ -179,7 +108,9 @@ mod tests {
         MONGO_EXTENSION_STATUS_OK,
     };
     use extension_sdk_mongodb::version::EXTENSION_API_VERSION;
-    use extension_sdk_mongodb::{GET_MONGODB_EXTENSION_SYMBOL, GET_MONGODB_EXTENSION_VERSIONS_SYMBOL};
+    use extension_sdk_mongodb::{
+        GET_MONGODB_EXTENSION_SYMBOL, GET_MONGODB_EXTENSION_VERSIONS_SYMBOL,
+    };
 
     static REGISTERED_NAMES: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
@@ -194,22 +125,13 @@ mod tests {
     }
 
     #[test]
-    fn registers_both_mongodb_stage_names() {
-        assert_eq!(SEARCH_OPS.name, "$search");
+    fn registers_vector_stage_name() {
         assert_eq!(VECTOR_SEARCH_OPS.name, "$vectorSearch");
     }
 
     #[test]
-    fn search_and_vector_parse_distinct_query_kinds() {
-        let search = OpenSearchSearch::parse(doc! { "path": "description", "query": "boots" }).unwrap();
-        let vector =
-            OpenSearchVectorSearch::parse(doc! { "path": "description", "query": "rain shell" }).unwrap();
-        assert_ne!(search.kind, vector.kind);
-    }
-
-    #[test]
-    fn search_stages_generate_candidates_without_collection_scan() {
-        for properties in [search_static_properties(), vector_static_properties()] {
+    fn vector_stage_generates_candidates_without_collection_scan() {
+        for properties in [vector_static_properties()] {
             assert!(!properties.get_bool("requiresInputDocSource").unwrap());
             assert_eq!(properties.get_str("position").unwrap(), "first");
         }
@@ -217,10 +139,6 @@ mod tests {
 
     #[test]
     fn static_properties_declare_stage_score_metadata() {
-        assert_eq!(
-            search_static_properties().get_array("providedMetadataFields").unwrap(),
-            &[Bson::String("searchScore".to_string())]
-        );
         assert_eq!(
             vector_static_properties()
                 .get_array("providedMetadataFields")
@@ -230,8 +148,11 @@ mod tests {
     }
 
     #[test]
-    fn exported_extension_registers_search_and_vector_search() {
-        registered_names().lock().expect("registered names mutex").clear();
+    fn exported_extension_registers_only_vector_search() {
+        registered_names()
+            .lock()
+            .expect("registered names mutex")
+            .clear();
         let portal_vtable = MongoExtensionHostPortalVTable {
             register_stage_descriptor: register_recording_name,
             get_extension_options,
@@ -260,10 +181,14 @@ mod tests {
                 std::ptr::from_ref(&services),
                 std::ptr::addr_of_mut!(extension),
             );
-            assert_eq!(((*(*status).vtable).get_code)(status), MONGO_EXTENSION_STATUS_OK);
+            assert_eq!(
+                ((*(*status).vtable).get_code)(status),
+                MONGO_EXTENSION_STATUS_OK
+            );
             ((*(*status).vtable).destroy)(status);
             assert!(!extension.is_null());
-            let init_status = ((*(*extension).vtable).initialize)(extension, std::ptr::from_ref(&portal));
+            let init_status =
+                ((*(*extension).vtable).initialize)(extension, std::ptr::from_ref(&portal));
             assert_eq!(
                 ((*(*init_status).vtable).get_code)(init_status),
                 MONGO_EXTENSION_STATUS_OK
@@ -272,7 +197,7 @@ mod tests {
         }
         assert_eq!(
             *registered_names().lock().expect("registered names mutex"),
-            vec!["$search".to_string(), "$vectorSearch".to_string()]
+            vec!["$vectorSearch".to_string()]
         );
     }
 

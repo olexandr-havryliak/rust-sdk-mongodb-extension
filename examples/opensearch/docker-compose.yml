@@ -1,4 +1,4 @@
-# OpenSearch-backed MongoDB search demo. From repo root:
+# OpenSearch-backed MongoDB vector search demo. From repo root:
 #   ./examples/opensearch/run-demo.sh test
 services:
   mongo:
@@ -93,7 +93,7 @@ services:
     command:
       - /bin/bash
       - -ec
-      - kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic search_demo.products --partitions 1 --replication-factor 1
+      - kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic mongodb.search_demo.products --partitions 1 --replication-factor 1
     restart: "no"
 
   connect:
@@ -109,6 +109,7 @@ services:
       CONNECT_BOOTSTRAP_SERVERS: kafka:9092
       CONNECT_REST_ADVERTISED_HOST_NAME: connect
       CONNECT_GROUP_ID: opensearch-demo-connect
+      CONNECT_OFFSET_FLUSH_INTERVAL_MS: 1000
       CONNECT_CONFIG_STORAGE_TOPIC: _connect-configs
       CONNECT_OFFSET_STORAGE_TOPIC: _connect-offsets
       CONNECT_STATUS_STORAGE_TOPIC: _connect-status
@@ -133,6 +134,8 @@ services:
       kafka-topic:
         condition: service_completed_successfully
       mongo-seed:
+        condition: service_completed_successfully
+      opensearch-setup:
         condition: service_completed_successfully
     volumes:
       - ./config:/config:ro
@@ -190,52 +193,48 @@ services:
     ports:
       - "5601:5601"
 
-  indexer:
-    restart: unless-stopped
-    build:
-      context: ../..
-      dockerfile: examples/opensearch/indexer/Dockerfile
+  opensearch-setup:
+    image: python:3.11-slim
     depends_on:
-      kafka:
-        condition: service_healthy
-      opensearch:
-        condition: service_healthy
       opensearch-model:
         condition: service_completed_successfully
-      connect-setup:
-        condition: service_completed_successfully
     volumes:
+      - ./scripts:/scripts:ro
       - ./config:/config:ro
       - opensearch-model:/model:ro
-    environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      KAFKA_TOPICS: search_demo.products
-      KAFKA_GROUP_ID: mongodb-opensearch-indexer
-      OPENSEARCH_URL: http://opensearch:9200
-      INDEX_CONFIG: /config/indexing.yml
-      OPENSEARCH_MODEL_ID_FILE: /model/model-id
+    command: ["python", "/scripts/setup-opensearch.py"]
+    restart: "no"
 
   sync-tests:
     build:
       context: ../..
       dockerfile: examples/opensearch/tests/Dockerfile
     depends_on:
-      indexer:
-        condition: service_started
       connect-setup:
         condition: service_completed_successfully
       opensearch:
         condition: service_healthy
     profiles: ["test"]
-
-  indexer-tests:
-    build:
-      context: ../..
-      dockerfile: examples/opensearch/indexer/Dockerfile
     volumes:
-      - ./indexer:/tests:ro
-    working_dir: /tests
-    command: ["python", "-m", "unittest", "-v", "test_indexer"]
+      - ./config:/config:ro
+
+  configuration-tests:
+    image: python:3.11-slim
+    volumes:
+      - .:/demo:ro
+    working_dir: /demo/tests
+    command: ["python", "-m", "unittest", "-v", "test_configuration"]
+    profiles: ["test"]
+
+  pipeline-tests:
+    image: python:3.11-slim
+    depends_on:
+      opensearch-setup:
+        condition: service_completed_successfully
+    volumes:
+      - .:/demo:ro
+    working_dir: /demo/tests
+    command: ["python", "-m", "unittest", "-v", "test_pipeline"]
     profiles: ["test"]
 
 volumes:

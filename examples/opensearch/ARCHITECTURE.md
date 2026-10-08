@@ -1,134 +1,125 @@
-# OpenSearch Architecture
+# Vector Search Architecture
 
-For build, startup, and MongoDB/OpenSearch demo commands, see [README.md](README.md).
-For connector configuration, see [SYNC.md](SYNC.md). Consumer HA/FT details are
-in [INDEXER.md](INDEXER.md).
+See [README.md](README.md) for commands, [SYNC.md](SYNC.md) for configurations,
+and [CONNECTOR.md](CONNECTOR.md) for ordering and recovery limits.
 
-## Architecture
+## Components
 
-```mermaid
-flowchart LR
-    Seed[Dataset / mongosh writes] --> Mongo[MongoDB replica set<br/>search_demo.products]
-    Mongo -->|Initial copy + change streams| Connect[MongoDB Kafka Source Connector]
-    Connect -->|Full documents / delete tombstones| Kafka[Kafka topic<br/>search_demo.products]
-    Kafka --> Indexer[Indexer<br/>field projection + mappings]
-    Config[config/indexing.yml] --> Indexer
-    Indexer -->|Same document ID / full reindex| Ingest[OpenSearch ingest pipeline<br/>text_embedding]
-    Model[Deployed ML Commons model<br/>MiniLM / ONNX / 384 dimensions] --> Ingest
-    Ingest --> Index[OpenSearch index<br/>search_demo.products]
-    Index --> Dashboards[OpenSearch Dashboards]
-```
+### CRUD Synchronization
 
 ```mermaid
-sequenceDiagram
-    participant Client as mongosh
-    participant Mongo as MongoDB + Rust extension
-    participant OS as OpenSearch
-    participant ML as ML Commons model
-    Client->>Mongo: aggregate($search or $vectorSearch)
-    Mongo->>OS: match query or neural query (no model_id)
-    opt $vectorSearch
-        OS->>ML: Embed query text using default search pipeline model
-        ML-->>OS: 384-dimensional query vector
-    end
-    OS-->>Mongo: Matching document IDs + scores
-    Mongo->>Mongo: Host $_internalSearchIdLookup fetches full documents
-    Mongo-->>Client: MongoDB documents + score metadata
+flowchart TB
+    Writes[Application CRUD writes] --> Mongo[MongoDB replica set]
+    Mongo -->|copy_existing + change streams| Source[MongoDB Kafka Source]
+    Source --> Kafka[Kafka topic: mongodb.db.collection]
+    Kafka --> Sink[Aiven OpenSearch Sink + Kafka SMTs]
+    Sink -->|insert / update / replace: projected text| Ingest[OpenSearch ingest pipeline]
+    Ingest --> Model[OpenSearch ML model]
+    Model --> Index[Vector-only index: mongodb.db.collection]
+    Sink -->|delete: keyed DELETE request| Index
 ```
 
-MongoDB is the source of truth. Synchronization goes from MongoDB to OpenSearch;
-search requests go through the Rust SDK for MongoDB Extensions. Search/vector
-indexes live in OpenSearch. This Docker demo uses single-node services without
-TLS/auth or HA.
+DELETE requests go directly from the sink to OpenSearch, bypassing ingest.
+There is one Connect worker, one topic partition, one source task, and one sink
+task. There is no custom Kafka consumer or sink script.
 
-## What Startup Configures
+### Aggregation Pipeline
 
-### Kafka and the Indexer
+```mermaid
+flowchart TB
+    Client[MongoDB aggregation client] --> Stage["$vectorSearch: path + text query"]
+    Stage --> Extension[Rust vectorSearch extension]
+    Extension --> Query[OpenSearch neural query with default embedding model]
+    Query --> Index[Vector-only index: mongodb.db.collection]
+    Index --> Candidates[Document IDs + scores]
+    Candidates --> Lookup["MongoDB $_internalSearchIdLookup"]
+    Lookup --> Mongo[Fetch full documents from MongoDB by ID]
+    Mongo --> Score["$set / $project: vectorSearchScore metadata"]
+    Score --> Result[Full documents + scores returned to client]
+```
 
-Kafka buffers MongoDB changes between the source connector and the OpenSearch
-indexer. [Dockerfile.connect](Dockerfile.connect) installs the connector into the
-Kafka Connect image; [docker-compose.yml](docker-compose.yml) starts the broker,
-Connect worker, and registration service.
+## Startup and Automatic Mappings
 
-[indexer/indexer.py](indexer/indexer.py) is the Kafka-to-OpenSearch consumer. It
-creates mappings and pipelines, projects configured fields, and writes or tombstones
-OpenSearch documents. It is separate from both the source connector and the
-MongoDB query extension. Its processing and scaling guarantees are described
-in [INDEXER.md](INDEXER.md).
-
-### OpenSearch Mappings
-
-After model setup, [indexer/indexer.py](indexer/indexer.py) reads
-[config/indexing.yml](config/indexing.yml) and creates index
-`search_demo.products` with these mappings:
-
-| Field | OpenSearch type |
-| --- | --- |
-| `_mongo_namespace` | `keyword` |
-| `_mongo_id` | `keyword` |
-| `_sync_deleted` | `boolean` |
-| `_sync_topic_id` | `keyword` |
-| `name` | `text` |
-| `description` | `text` |
-| `description_embedding` | `knn_vector`, dimension `384`, HNSW / Lucene / cosine similarity |
-| `category` | `keyword` |
-| `price` | `float` |
-| `inStock` | `boolean` |
-| `updatedAt` | `date` |
-
-The `search` tag creates a text field. The `vectorSearch` tag also creates
-`<field>_embedding`. `filter` and `sort` fields use their configured scalar types.
-Only configured fields are sent to OpenSearch, plus namespace and sync metadata.
-The OpenSearch document ID is the canonical JSON of the original MongoDB `_id`,
-and `_mongo_id` stores that same JSON so `$search` and `$vectorSearch` can emit
-the original BSON type to `$_internalSearchIdLookup`. Distinct BSON types stay
-distinct keys: integer `1`, string `"1"`, and an ObjectId do not overwrite one
-another. The connector's simplified JSON does not distinguish
-int32 from int64: a bare JSON integer that fits in int32 is restored as int32,
-while `$numberInt`, `$numberLong`, and `$oid` keep the type they declare.
-
-The indexer consumes Kafka messages and fully reindexes each inserted, replaced,
-or updated document. A delete creates a persistent fence document, excluded from
-both search stages. Kafka offset-based external versions reject stale writes;
-the index's `_meta` binds it to the Kafka topic UUID and configuration.
-
-### Embedding Model and Defaults
+During image build, [Dockerfile.connect](Dockerfile.connect) installs the MongoDB
+source connector and pinned Aiven OpenSearch sink version **3.2.0**.
+[docker-compose.yml](docker-compose.yml) initializes the MongoDB replica set,
+loads the dataset, and creates `mongodb.search_demo.products` with one partition.
 
 [scripts/register-opensearch-model.py](scripts/register-opensearch-model.py)
-registers and deploys the OpenSearch-provided model:
+registers and deploys **huggingface/sentence-transformers/paraphrase-MiniLM-L3-v2**,
+version **1.0.2**, format **ONNX**, dimension **384**. OpenSearch downloads the
+open pretrained model and its inference runtime on first setup. A prediction
+smoke test checks the dimension before writing the resolved ID to `/model/model-id`.
+The setup script adjusts ML memory/allocation settings for this disposable demo;
+these relaxed settings are not production recommendations.
 
-- Name: `huggingface/sentence-transformers/paraphrase-MiniLM-L3-v2`
-- Version: `1.0.2`
-- Format: `ONNX`
-- Output: `384`-dimensional embeddings
+After model registration, [scripts/setup-opensearch.py](scripts/setup-opensearch.py)
+reads that ID and installs these shared resources:
 
-The script runs in the `opensearch-model` container, waits for registration and
-deployment to complete, checks inference, and writes the model ID to a shared
-Docker volume. Inference runs locally in OpenSearch ML Commons.
+| Resource | Configuration | Role |
+| --- | --- | --- |
+| `mongodb-auto-embed` ingest pipeline | [opensearch-ingest-pipeline.json](config/opensearch-ingest-pipeline.json) | Converts every projected text field into its own vector and removes text. |
+| `mongodb-default-model` search pipeline | [opensearch-search-pipeline.json](config/opensearch-search-pipeline.json) | `neural_query_enricher.default_model_id` supplies the model for any neural field. |
+| `mongodb-vectors` index template | [opensearch-index-template.json](config/opensearch-index-template.json) | Matches only `mongodb.*`; installs both default pipelines and dynamically maps `*_embedding`. |
 
-The indexer reads that model ID and creates two pipelines:
+The template uses `knn_vector`, dimension 384, HNSW, Lucene, cosine similarity.
+One shard and zero replicas are demo settings. The template does not match
+OpenSearch's system indices. New MongoDB namespaces use the same template
+without adding explicit field mappings. Existing indices are not retroactively
+remapped when the template changes.
 
-| Pipeline | Purpose |
-| --- | --- |
-| `search_demo-products-auto-embed` | Uses `text_embedding` to generate `description_embedding` from document text. |
-| `search_demo-products-default-neural-model` | Uses `neural_query_enricher` to supply the default model ID for queries on `description_embedding`. |
+Finally [scripts/register-source-connector.sh](scripts/register-source-connector.sh)
+registers the sink, then the source, from their JSON configurations. The sink's
+first document creates the index automatically using the shared template.
+Kafka config selects fields; the one-time OpenSearch bootstrap installs ML and
+shared resources. Kafka Connect itself does not register ML models or pipelines.
 
-When creating the index, the indexer attaches them as
-`index.default_pipeline` and `index.search.default_pipeline`. Consequently,
-documents receive vectors automatically, and `$vectorSearch` queries only need
-`path` and query text. The model is configured on the OpenSearch side, rather
-than passed in MongoDB aggregation arguments.
+## Universal Embedding Pipeline
 
-### MongoDB Extension
+Kafka projects only `description` in both demo namespaces. `title` is not
+indexed. The pipeline does not contain these names and supports arbitrary flat,
+non-empty string fields selected by the Kafka sink configuration.
 
-[Dockerfile](Dockerfile) builds and loads one Rust extension that registers
-both `$search` and `$vectorSearch`. Its OpenSearch endpoints are configured
-under `extensionOptions` in `/etc/mongo/extensions/opensearch.conf`.
+1. A Painless processor validates source fields and creates temporary text inputs
+   plus an ordered list of their original names.
+2. OpenSearch's standard `text_embedding` processor generates each vector with
+   the deployed model using a fixed nested field map.
+3. A second Painless processor validates dimensions, writes `<field>_embedding`,
+   and removes the original text and temporary fields.
 
-The extension sends queries to index `search_demo.products`, receives IDs and
-scores, and delegates full document lookup to MongoDB's
-`$_internalSearchIdLookup`. Scores are available through `$meta` projection.
-These are PoC stage shapes; they do not implement the full Atlas Search syntax.
+Field names are kept separately because OpenSearch 2.19's nested preprocessing
+does not preserve auxiliary keys in the list entries. The live pipeline tests
+verify field/vector correspondence across fields and documents. Invalid types,
+blank values, dotted names, names beginning with `_`, and names ending in
+`_embedding` fail ingestion. An empty projected document is accepted but has no
+searchable vectors. ML failures fail the write instead of storing partial data.
 
-The consumer supports active-standby, but the single-node infrastructure is not
-highly available. See [INDEXER.md](INDEXER.md) for guarantees and remaining limits.
+For example, MongoDB `{ "_id": "p001", "title": "Hiking pack",
+"description": "Waterproof backpack" }` is projected to `{ "description":
+"Waterproof backpack" }`, then becomes `{ "description_embedding": [...] }`
+in OpenSearch with the same document ID.
+Document updates fully replace this vector document; removing a source field
+removes its previous embedding. The MongoDB document is not modified.
+
+## Query Flow and Default Model
+
+The Rust SDK for MongoDB Extensions example registers only `$vectorSearch` in
+one shared library. It accepts `path`, a text `query`, and optional `limit` and
+OpenSearch-DSL `filter`. It derives index `mongodb.<catalog namespace>` and
+queries `<path>_embedding` with `query_text`, not a client-provided query vector.
+The template's `index.search.default_pipeline` makes the deployed model the
+default, so neither aggregation clients nor the extension pass a model ID.
+
+OpenSearch returns `_id` and `_score`. The source stage emits IDs with
+`vectorSearchScore` metadata, then expands to the MongoDB host's
+`$_internalSearchIdLookup`. MongoDB fetches the full source documents by ID.
+Use `$set` or `$project` with `$meta: "vectorSearchScore"` to expose the score.
+Demo IDs are strings; other BSON ID representations are not certified.
+
+Extension configuration contains endpoints only. Endpoints are tried in order
+with bounded request timeouts; failure of every endpoint returns an error.
+This is query failover, not a background heartbeat/cluster health subsystem.
+There is no text-search stage and no scalar field index in this vector-only PoC.
+
+New namespaces need connector configurations only, not a new model or extension.
+See [CONNECTOR-LIFECYCLE.md](CONNECTOR-LIFECYCLE.md) for runtime management.
