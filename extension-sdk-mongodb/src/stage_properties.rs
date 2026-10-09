@@ -135,13 +135,19 @@ mod tests {
         let properties = StageProperties::source_stage_default();
         let mut expected = properties.to_document();
         expected.insert("hostType", "router");
-        assert_eq!(properties.to_document_with_host_type(HostTypeRequirement::Router), expected);
+        assert_eq!(
+            properties.to_document_with_host_type(HostTypeRequirement::Router),
+            expected
+        );
     }
 
     #[test]
     fn unspecified_placement_preserves_existing_bson_contract() {
         let properties = StageProperties::source_stage_default();
-        assert_eq!(properties.to_document_with_host_type(HostTypeRequirement::None), properties.to_document());
+        assert_eq!(
+            properties.to_document_with_host_type(HostTypeRequirement::None),
+            properties.to_document()
+        );
     }
 
     #[test]
@@ -151,7 +157,7 @@ mod tests {
         assert_eq!(d.len(), 3);
         assert_eq!(d.get_str("streamType").unwrap(), "streaming");
         assert_eq!(d.get_str("position").unwrap(), "none");
-        assert_eq!(d.get_bool("requiresInputDocSource").unwrap(), true);
+        assert!(d.get_bool("requiresInputDocSource").unwrap());
     }
 
     #[test]
@@ -159,7 +165,7 @@ mod tests {
         let d = StageProperties::source_stage_default().to_document();
         assert_eq!(d.get_str("streamType").unwrap(), "streaming");
         assert_eq!(d.get_str("position").unwrap(), "first");
-        assert_eq!(d.get_bool("requiresInputDocSource").unwrap(), true);
+        assert!(d.get_bool("requiresInputDocSource").unwrap());
     }
 
     #[test]
@@ -173,7 +179,7 @@ mod tests {
         assert_eq!(d.len(), 3);
         assert_eq!(d.get_str("streamType").unwrap(), "blocking");
         assert_eq!(d.get_str("position").unwrap(), "first");
-        assert_eq!(d.get_bool("requiresInputDocSource").unwrap(), false);
+        assert!(!d.get_bool("requiresInputDocSource").unwrap());
     }
 
     #[test]

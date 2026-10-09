@@ -15,8 +15,7 @@ jobs:
 
       - name: Rust unit tests (Docker; no host toolchain)
         run: |
-          chmod +x e2e-tests/run-sdk-tests-docker.sh
-          ./e2e-tests/run-sdk-tests-docker.sh
+          bash .github/testing/sdk.sh
 
   docker-e2e:
     runs-on: ubuntu-latest
@@ -24,14 +23,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: End-to-end (Docker + MongoDB 8.3)
-        run: |
-          chmod +x e2e-tests/run-e2e.sh
-          ./e2e-tests/run-e2e.sh
-
-      - name: Random aggregation fuzz (same stack; short run)
+      - name: End-to-end and random aggregation fuzz (Docker + MongoDB 9.0)
         env:
           ITERATIONS: "1500"
         run: |
-          chmod +x e2e-tests/run-fuzz-e2e.sh
-          ./e2e-tests/run-fuzz-e2e.sh
+          bash .github/testing/e2e.sh

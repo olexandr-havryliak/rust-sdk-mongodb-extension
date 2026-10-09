@@ -1,0 +1,16 @@
+[package]
+name = "sdk_abi_harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+extension-sdk-mongodb = { path = "../../../extension-sdk-mongodb" }
+
+[build-dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"

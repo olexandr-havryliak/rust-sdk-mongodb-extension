@@ -45,7 +45,13 @@ fn bson_as_i64(v: Option<&Bson>) -> Option<i64> {
     }
 }
 
-fn bounded_i64_arg(args: &Document, key: &str, default: i64, min: i64, max: i64) -> Result<i64, String> {
+fn bounded_i64_arg(
+    args: &Document,
+    key: &str,
+    default: i64,
+    min: i64,
+    max: i64,
+) -> Result<i64, String> {
     let v = match bson_as_i64(args.get(key)) {
         Some(x) => x,
         None => {
@@ -78,20 +84,9 @@ fn read_body_limited(mut reader: impl Read, max_bytes: usize) -> Result<Vec<u8>,
 
 fn http_fetch_eof(args: &Document) -> Result<Document, String> {
     let url = url_from_args(args)?;
-    let max_bytes = bounded_i64_arg(
-        args,
-        "maxBytes",
-        DEFAULT_MAX_BYTES,
-        1,
-        ABS_MAX_BYTES,
-    )? as usize;
-    let timeout_ms = bounded_i64_arg(
-        args,
-        "timeoutMs",
-        DEFAULT_TIMEOUT_MS,
-        100,
-        120_000,
-    )? as u64;
+    let max_bytes =
+        bounded_i64_arg(args, "maxBytes", DEFAULT_MAX_BYTES, 1, ABS_MAX_BYTES)? as usize;
+    let timeout_ms = bounded_i64_arg(args, "timeoutMs", DEFAULT_TIMEOUT_MS, 100, 120_000)? as u64;
 
     let agent = AgentBuilder::new()
         .timeout(Duration::from_millis(timeout_ms))
@@ -109,10 +104,7 @@ fn http_fetch_eof(args: &Document) -> Result<Document, String> {
     };
 
     let status = resp.status() as i32;
-    let content_type = resp
-        .header("Content-Type")
-        .unwrap_or("")
-        .to_string();
+    let content_type = resp.header("Content-Type").unwrap_or("").to_string();
 
     let body_bytes = match read_body_limited(resp.into_reader(), max_bytes) {
         Ok(b) => b,

@@ -1,0 +1,53 @@
+name: Run Docker check
+description: Run the same typed check locally and on GitHub, publishing JUnit with a ready-made action.
+inputs:
+  check:
+    description: One of fmt, clippy, tests, audit, abi, asan
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Build pinned Docker tools
+      id: toolchain
+      shell: bash
+      env:
+        TESTING_IMAGE: rust-sdk-testing:ci
+      run: bash .github/testing/build-image.sh
+    - name: Run check inside Docker
+      id: check
+      if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+      shell: bash
+      env:
+        TESTING_IMAGE: rust-sdk-testing:ci
+        TESTING_BUILD_IMAGE: "0"
+        CHECK: ${{ inputs.check }}
+      run: |
+        case "$CHECK" in
+          fmt|clippy|tests|audit|abi|asan) bash ".github/testing/$CHECK.sh" ;;
+          *) echo "Unknown check: $CHECK" >&2; exit 2 ;;
+        esac
+    - name: Publish JUnit results
+      id: junit
+      if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && inputs.check != 'fmt' }}
+      uses: EnricoMi/publish-unit-test-result-action@v2
+      with:
+        files: reports/${{ inputs.check }}/*.xml
+        check_name: SDK ${{ inputs.check }} results
+        check_run: "false"
+        comment_mode: "off"
+        compare_to_earlier_commit: "false"
+        job_summary: "true"
+        action_fail: "true"
+        action_fail_on_inconclusive: "true"
+    - name: Keep diagnostics and reports
+      id: artifacts
+      if: ${{ always() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: sdk-testing-${{ inputs.check }}
+        path: |
+          reports/build/
+          reports/${{ inputs.check }}/
+          !reports/**/harness
+        retention-days: 14
+        if-no-files-found: warn

@@ -2,8 +2,8 @@
 
 use crate::host;
 use crate::sys::{
-    MongoExtensionLogAttributesArray, MongoExtensionLogMessage, MongoExtensionLogMessageSeverityOrLevel,
-    MongoExtensionLogSeverity, MongoExtensionLogType,
+    MongoExtensionLogAttributesArray, MongoExtensionLogMessage,
+    MongoExtensionLogMessageSeverityOrLevel, MongoExtensionLogSeverity, MongoExtensionLogType,
 };
 
 fn log_with(
@@ -15,7 +15,7 @@ fn log_with(
     let Some(svcs) = host::host_services_vtable() else {
         return;
     };
-    let logger = unsafe { ((*svcs).get_logger)() };
+    let logger = unsafe { (svcs.get_logger)() };
     if logger.is_null() {
         return;
     }
@@ -37,7 +37,9 @@ fn log_with(
         len: bytes.len() as u64,
     };
     let sev_or = match typ {
-        MongoExtensionLogType::kDebug => MongoExtensionLogMessageSeverityOrLevel { level: debug_level },
+        MongoExtensionLogType::kDebug => {
+            MongoExtensionLogMessageSeverityOrLevel { level: debug_level }
+        }
         _ => MongoExtensionLogMessageSeverityOrLevel { severity },
     };
     let lm = MongoExtensionLogMessage {

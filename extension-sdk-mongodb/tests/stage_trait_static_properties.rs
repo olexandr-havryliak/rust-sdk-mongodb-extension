@@ -44,8 +44,8 @@ fn transform_stage_default_properties_match_transform_defaults() {
 
 #[test]
 fn transform_stage_default_expand_is_self_stage() {
-    let a = MapDefaultProps::parse(bson::doc! {}).unwrap();
-    assert_eq!(MapDefaultProps::expand(&a), Expansion::SelfStage);
+    MapDefaultProps::parse(bson::doc! {}).unwrap();
+    assert_eq!(MapDefaultProps::expand(&()), Expansion::SelfStage);
 }
 
 struct MapCustomProps;
@@ -85,7 +85,7 @@ fn transform_stage_custom_properties_to_document() {
     assert_eq!(d.len(), 3);
     assert_eq!(d.get_str("streamType").unwrap(), "blocking");
     assert_eq!(d.get_str("position").unwrap(), "first");
-    assert_eq!(d.get_bool("requiresInputDocSource").unwrap(), false);
+    assert!(!d.get_bool("requiresInputDocSource").unwrap());
 }
 
 struct SrcDefault;
@@ -116,13 +116,13 @@ fn source_stage_default_properties_are_streaming_first_requires_input() {
     assert!(p.requires_input);
     let d = p.to_document();
     assert_eq!(d.get_str("position").unwrap(), "first");
-    assert_eq!(d.get_bool("requiresInputDocSource").unwrap(), true);
+    assert!(d.get_bool("requiresInputDocSource").unwrap());
 }
 
 #[test]
 fn source_stage_default_expand_is_self_stage() {
-    let a = SrcDefault::parse(bson::doc! {}).unwrap();
-    assert_eq!(SrcDefault::expand(&a), Expansion::SelfStage);
+    SrcDefault::parse(bson::doc! {}).unwrap();
+    assert_eq!(SrcDefault::expand(&()), Expansion::SelfStage);
 }
 
 struct SrcCustom;
@@ -158,7 +158,7 @@ fn source_stage_custom_properties_round_trip_document() {
     let d = SrcCustom::properties().to_document();
     assert_eq!(d.len(), 3);
     assert_eq!(d.get_str("position").unwrap(), "last");
-    assert_eq!(d.get_bool("requiresInputDocSource").unwrap(), true);
+    assert!(d.get_bool("requiresInputDocSource").unwrap());
 }
 
 /// Exercises [`TransformStage::expand`] returning [`Expansion::Pipeline`].

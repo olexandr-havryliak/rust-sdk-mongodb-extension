@@ -17,7 +17,9 @@ use extension_sdk_mongodb::version::EXTENSION_API_VERSION;
 
 static INIT_HOOK_RAN: AtomicBool = AtomicBool::new(false);
 
-unsafe fn on_init(_portal: *const extension_sdk_mongodb::sys::MongoExtensionHostPortal) -> Result<(), String> {
+unsafe fn on_init(
+    _portal: *const extension_sdk_mongodb::sys::MongoExtensionHostPortal,
+) -> Result<(), String> {
     INIT_HOOK_RAN.store(true, Ordering::SeqCst);
     Ok(())
 }

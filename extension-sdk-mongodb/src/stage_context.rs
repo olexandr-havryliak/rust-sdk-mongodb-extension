@@ -7,7 +7,9 @@ use crate::extension_log;
 use crate::host;
 use crate::operation_metrics::SdkOperationMetrics;
 use crate::status;
-use crate::sys::{MongoExtensionOperationMetrics, MongoExtensionQueryExecutionContext, MONGO_EXTENSION_STATUS_OK};
+use crate::sys::{
+    MongoExtensionOperationMetrics, MongoExtensionQueryExecutionContext, MONGO_EXTENSION_STATUS_OK,
+};
 
 /// Collection metadata captured while binding an extension stage.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,7 +120,8 @@ impl StageContext {
             let vt = q.as_ref().vtable;
             let mut ts: i64 = 0;
             let st = ((*vt).get_deadline_timestamp_ms)(
-                q.as_ptr().cast::<MongoExtensionQueryExecutionContext>() as *const MongoExtensionQueryExecutionContext,
+                q.as_ptr().cast::<MongoExtensionQueryExecutionContext>()
+                    as *const MongoExtensionQueryExecutionContext,
                 std::ptr::addr_of_mut!(ts),
             );
             if st.is_null() {
@@ -130,7 +133,11 @@ impl StageContext {
             let msg = if reason.data.is_null() || reason.len == 0 {
                 "get_deadline_timestamp_ms failed".into()
             } else {
-                String::from_utf8_lossy(std::slice::from_raw_parts(reason.data, reason.len as usize)).into_owned()
+                String::from_utf8_lossy(std::slice::from_raw_parts(
+                    reason.data,
+                    reason.len as usize,
+                ))
+                .into_owned()
             };
             ((*svt).destroy)(st);
             if code == MONGO_EXTENSION_STATUS_OK {
@@ -150,7 +157,8 @@ impl StageContext {
             // Host populates this extension-owned status (see `mongodb_extension_api.h`).
             let qs = status::new_error_status(MONGO_EXTENSION_STATUS_OK, "");
             let ret = ((*vt).check_for_interrupt)(
-                q.as_ptr().cast::<MongoExtensionQueryExecutionContext>() as *const MongoExtensionQueryExecutionContext,
+                q.as_ptr().cast::<MongoExtensionQueryExecutionContext>()
+                    as *const MongoExtensionQueryExecutionContext,
                 qs,
             );
             if !ret.is_null() {
@@ -163,7 +171,11 @@ impl StageContext {
             let msg = if reason.data.is_null() || reason.len == 0 {
                 "check_for_interrupt".into()
             } else {
-                String::from_utf8_lossy(std::slice::from_raw_parts(reason.data, reason.len as usize)).into_owned()
+                String::from_utf8_lossy(std::slice::from_raw_parts(
+                    reason.data,
+                    reason.len as usize,
+                ))
+                .into_owned()
             };
             ((*svt).destroy)(qs);
             if code == MONGO_EXTENSION_STATUS_OK {

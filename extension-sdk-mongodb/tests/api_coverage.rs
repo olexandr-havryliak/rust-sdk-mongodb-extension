@@ -42,8 +42,14 @@ fn get_mongodb_extension_export_symbol_bytes() {
 fn extension_api_version_matches_sys_constants() {
     assert_eq!(EXTENSION_API_VERSION.major, 1);
     assert_eq!(EXTENSION_API_VERSION.minor, 0);
-    assert_eq!(EXTENSION_API_VERSION.major, extension_sdk_mongodb::sys::MONGODB_EXTENSION_API_MAJOR_VERSION);
-    assert_eq!(EXTENSION_API_VERSION.minor, extension_sdk_mongodb::sys::MONGODB_EXTENSION_API_MINOR_VERSION);
+    assert_eq!(
+        EXTENSION_API_VERSION.major,
+        extension_sdk_mongodb::sys::MONGODB_EXTENSION_API_MAJOR_VERSION
+    );
+    assert_eq!(
+        EXTENSION_API_VERSION.minor,
+        extension_sdk_mongodb::sys::MONGODB_EXTENSION_API_MINOR_VERSION
+    );
 }
 
 #[test]
@@ -80,7 +86,10 @@ fn descriptor_and_host_portal_vtables_match_api_1_0_slots() {
         std::mem::size_of::<extension_sdk_mongodb::sys::MongoExtensionExecAggStageVTable>(),
         9 * std::mem::size_of::<usize>()
     );
-    assert_eq!(MongoExtensionClientType::kMongoExtensionClientTypeAny as u32, 0);
+    assert_eq!(
+        MongoExtensionClientType::kMongoExtensionClientTypeAny as u32,
+        0
+    );
     assert_eq!(
         MongoExtensionClientType::kMongoExtensionClientTypeInternal as u32,
         1
@@ -89,14 +98,17 @@ fn descriptor_and_host_portal_vtables_match_api_1_0_slots() {
 
 #[test]
 fn host_supports_extension_rejects_empty_or_null_versions() {
-    let empty = MongoExtensionAPIVersionVector { len: 0, versions: std::ptr::null_mut() };
-    assert!(!host_supports_extension(&empty, EXTENSION_API_VERSION));
+    let empty = MongoExtensionAPIVersionVector {
+        len: 0,
+        versions: std::ptr::null_mut(),
+    };
+    assert!(!unsafe { host_supports_extension(&empty, EXTENSION_API_VERSION) });
 
     let null_ptr = MongoExtensionAPIVersionVector {
         len: 1,
         versions: std::ptr::null_mut(),
     };
-    assert!(!host_supports_extension(&null_ptr, EXTENSION_API_VERSION));
+    assert!(!unsafe { host_supports_extension(&null_ptr, EXTENSION_API_VERSION) });
 }
 
 #[test]
@@ -109,7 +121,7 @@ fn host_supports_extension_accepts_compatible_slot() {
         len: 1,
         versions: slots.as_mut_ptr(),
     };
-    assert!(host_supports_extension(&v, EXTENSION_API_VERSION));
+    assert!(unsafe { host_supports_extension(&v, EXTENSION_API_VERSION) });
 }
 
 #[test]
@@ -126,17 +138,20 @@ fn host_supports_extension_minor_must_meet_extension_minor() {
         major: EXTENSION_API_VERSION.major,
         minor: EXTENSION_API_VERSION.minor + 1,
     };
-    assert!(!host_supports_extension(&v, newer_extension));
+    assert!(!unsafe { host_supports_extension(&v, newer_extension) });
 }
 
 #[test]
 fn host_supports_extension_wrong_major() {
-    let mut slots = [MongoExtensionAPIVersion { major: 99, minor: 99 }];
+    let mut slots = [MongoExtensionAPIVersion {
+        major: 99,
+        minor: 99,
+    }];
     let v = MongoExtensionAPIVersionVector {
         len: 1,
         versions: slots.as_mut_ptr(),
     };
-    assert!(!host_supports_extension(&v, EXTENSION_API_VERSION));
+    assert!(!unsafe { host_supports_extension(&v, EXTENSION_API_VERSION) });
 }
 
 // --- status ---
@@ -175,7 +190,10 @@ fn into_raw_byte_buf_view_and_destroy() {
     unsafe {
         let vt = (*raw).vtable;
         let v = ((*vt).get_view)(raw);
-        assert_eq!(std::slice::from_raw_parts(v.data, v.len as usize), &[1, 2, 3, 4]);
+        assert_eq!(
+            std::slice::from_raw_parts(v.data, v.len as usize),
+            &[1, 2, 3, 4]
+        );
         ((*vt).destroy)(raw);
     }
 }
@@ -290,7 +308,7 @@ unsafe extern "C" fn mock_create_id_lookup(
 #[test]
 fn host_set_services_vtable_register_and_extension_options() {
     assert!(host::host_services_vtable().is_none());
-    host::set_host_services(std::ptr::null());
+    unsafe { host::set_host_services(std::ptr::null()) };
 
     static HOST_PORTAL_VTABLE: MongoExtensionHostPortalVTable = MongoExtensionHostPortalVTable {
         register_stage_descriptor: mock_register_stage_descriptor,
@@ -316,7 +334,8 @@ fn host_set_services_vtable_register_and_extension_options() {
         vtable: &HOST_SVCS_VTABLE,
     };
 
-    host::set_host_services(std::ptr::from_ref(&svcs));
+    // SAFETY: svcs is readable here and its callback table has static storage.
+    unsafe { host::set_host_services(std::ptr::from_ref(&svcs)) };
     let vt = host::host_services_vtable().expect("vtable after set");
     assert_eq!(vt as *const _, std::ptr::from_ref(&HOST_SVCS_VTABLE));
 

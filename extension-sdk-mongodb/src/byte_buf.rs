@@ -3,7 +3,8 @@
 use std::boxed::Box;
 
 use crate::sys::{
-    MongoExtensionByteBuf, MongoExtensionByteBufVTable, MongoExtensionByteView, MongoExtensionStatus,
+    MongoExtensionByteBuf, MongoExtensionByteBufVTable, MongoExtensionByteView,
+    MongoExtensionStatus,
 };
 
 /// Heap object: C-visible `MongoExtensionByteBuf` plus owned bytes.
@@ -45,7 +46,9 @@ pub fn into_raw_byte_buf(bytes: Vec<u8>) -> *mut MongoExtensionByteBuf {
         },
         data: bytes,
     });
-    Box::into_raw(b).cast::<OwnedByteBuf>().cast::<MongoExtensionByteBuf>()
+    Box::into_raw(b)
+        .cast::<OwnedByteBuf>()
+        .cast::<MongoExtensionByteBuf>()
 }
 
 /// Convenience: BSON document to raw byte buffer for the host.

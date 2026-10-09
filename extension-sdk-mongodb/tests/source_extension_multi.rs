@@ -79,7 +79,9 @@ fn static_props() -> Document {
     extension_sdk_mongodb::StagePlan::source_default().static_properties_document()
 }
 
-fn expand_self(_doc: Document) -> extension_sdk_mongodb::ExtensionResult<extension_sdk_mongodb::Expansion> {
+fn expand_self(
+    _doc: Document,
+) -> extension_sdk_mongodb::ExtensionResult<extension_sdk_mongodb::Expansion> {
     Ok(extension_sdk_mongodb::Expansion::SelfStage)
 }
 
@@ -110,7 +112,10 @@ static OPS_B: SourceOps = SourceOps {
 #[test]
 fn initialize_registers_every_source_descriptor() {
     let _guard = test_lock().lock().expect("test mutex");
-    registered_names().lock().expect("registered names mutex").clear();
+    registered_names()
+        .lock()
+        .expect("registered names mutex")
+        .clear();
     registered_descriptors()
         .lock()
         .expect("registered descriptors mutex")
@@ -147,7 +152,10 @@ fn initialize_registers_every_source_descriptor() {
 #[test]
 fn each_descriptor_parses_and_names_its_own_stage() {
     let _guard = test_lock().lock().expect("test mutex");
-    registered_names().lock().expect("registered names mutex").clear();
+    registered_names()
+        .lock()
+        .expect("registered names mutex")
+        .clear();
     registered_descriptors()
         .lock()
         .expect("registered descriptors mutex")

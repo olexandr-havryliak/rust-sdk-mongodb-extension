@@ -4,8 +4,8 @@ use extension_sdk_mongodb::host;
 use extension_sdk_mongodb::status;
 use extension_sdk_mongodb::sys::{
     MongoExtensionByteView, MongoExtensionHostPortal, MongoExtensionHostPortalVTable,
-    MongoExtensionHostServices, MongoExtensionHostServicesVTable, MongoExtensionPipelineRewriteRule,
-    MongoExtensionStatus,
+    MongoExtensionHostServices, MongoExtensionHostServicesVTable,
+    MongoExtensionPipelineRewriteRule, MongoExtensionStatus,
 };
 use extension_sdk_mongodb::version::EXTENSION_API_VERSION;
 
@@ -16,7 +16,9 @@ unsafe extern "C" fn mock_register(
     status::status_ok()
 }
 
-unsafe extern "C" fn mock_get_opts(_: *const MongoExtensionHostPortal) -> extension_sdk_mongodb::sys::MongoExtensionByteView {
+unsafe extern "C" fn mock_get_opts(
+    _: *const MongoExtensionHostPortal,
+) -> extension_sdk_mongodb::sys::MongoExtensionByteView {
     static OPTS: &[u8] = b"sharedLibraryPath: /tmp/lib.so\n";
     extension_sdk_mongodb::sys::MongoExtensionByteView {
         data: OPTS.as_ptr(),
@@ -73,7 +75,7 @@ unsafe extern "C" fn mock_create_id(
 #[test]
 fn cache_extension_options_from_portal_populates_snapshot() {
     host::reset_extension_options_snapshot_for_tests();
-    host::set_host_services(std::ptr::null());
+    unsafe { host::set_host_services(std::ptr::null()) };
 
     static PORTAL_VT: MongoExtensionHostPortalVTable = MongoExtensionHostPortalVTable {
         register_stage_descriptor: mock_register,
@@ -93,10 +95,9 @@ fn cache_extension_options_from_portal_populates_snapshot() {
         host_extensions_api_version: EXTENSION_API_VERSION,
         host_mongodb_max_wire_version: 0,
     };
-    let svcs = MongoExtensionHostServices {
-        vtable: &SVCS_VT,
-    };
-    host::set_host_services(std::ptr::from_ref(&svcs));
+    let svcs = MongoExtensionHostServices { vtable: &SVCS_VT };
+    // SAFETY: svcs is readable here and its callback table has static storage.
+    unsafe { host::set_host_services(std::ptr::from_ref(&svcs)) };
 
     unsafe {
         host::cache_extension_options_from_portal(std::ptr::from_ref(&portal));

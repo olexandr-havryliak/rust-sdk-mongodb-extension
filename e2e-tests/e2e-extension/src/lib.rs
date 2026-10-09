@@ -20,10 +20,7 @@ fn parse_e2e_extension_param(yaml: &str) -> Option<String> {
             continue;
         }
         if let Some(rest) = t.strip_prefix("e2eExtensionParam:") {
-            let val = rest
-                .trim()
-                .trim_matches('"')
-                .trim_matches('\'');
+            let val = rest.trim().trim_matches('"').trim_matches('\'');
             if !val.is_empty() {
                 return Some(val.to_string());
             }
@@ -141,8 +138,14 @@ mod tests {
 
     #[test]
     fn resolve_defaults_when_empty_or_unparsed() {
-        assert_eq!(super::resolve_e2e_extension_param(None), "from_extension_yaml");
-        assert_eq!(super::resolve_e2e_extension_param(Some("")), "from_extension_yaml");
+        assert_eq!(
+            super::resolve_e2e_extension_param(None),
+            "from_extension_yaml"
+        );
+        assert_eq!(
+            super::resolve_e2e_extension_param(Some("")),
+            "from_extension_yaml"
+        );
         assert_eq!(
             super::resolve_e2e_extension_param(Some("only: shared\n")),
             "from_extension_yaml"
@@ -156,9 +159,7 @@ mod tests {
             "from_yaml"
         );
         assert_eq!(
-            super::resolve_e2e_extension_param(Some(
-                r#"{"e2eExtensionParam":"from_json"}"#
-            )),
+            super::resolve_e2e_extension_param(Some(r#"{"e2eExtensionParam":"from_json"}"#)),
             "from_json"
         );
     }
