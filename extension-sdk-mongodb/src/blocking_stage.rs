@@ -90,7 +90,11 @@ mod tests {
             })
         }
 
-        fn consume(state: &mut Self::State, input: Document, _ctx: &mut StageContext) -> Result<()> {
+        fn consume(
+            state: &mut Self::State,
+            input: Document,
+            _ctx: &mut StageContext,
+        ) -> Result<()> {
             assert!(
                 !state.finished,
                 "consume must not run after finish (EOF semantics)"

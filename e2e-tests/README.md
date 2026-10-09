@@ -46,8 +46,8 @@ chmod +x e2e-tests/run-sdk-tests-docker.sh
 ./e2e-tests/run-sdk-tests-docker.sh
 ```
 
-**Workspace tests + Miri (no E2E):** `chmod +x e2e-tests/run-all-checks-docker.sh && ./e2e-tests/run-all-checks-docker.sh`  
-Skip Miri: **`SKIP_MIRI=1 ./e2e-tests/run-all-checks-docker.sh`**.
+**All CI checks, sequentially:** `bash ./run-workflows-local.sh`.
+See [TESTING.md](../TESTING.md) for individual checks and reports.
 
 Override the toolchain image: **`RUST_TEST_IMAGE=my-registry/rust:nightly ./e2e-tests/run-sdk-tests-docker.sh`**.
 
@@ -132,19 +132,13 @@ docker compose -f e2e-tests/docker-compose.yml --project-name rust-sdk-mongo-e2e
 
 Scripts live under **`e2e-tests/scripts/`**. With the stack running, exec into the **`mongo`** service and run them by path (e.g. **`mongosh /scripts/opensearch_extension_load_e2e.js`**) or copy the pipeline into an interactive shell.
 
-### AddressSanitizer on `opensearch_extension` (Linux, nightly)
+### Checks And Sanitizers
 
-Sanitizes the OpenSearch extension **`cdylib`** build (you still need a matching **`mongod`** to load it):
-
-```bash
-docker run --rm -v "$PWD:/build" -w /build rust:bookworm bash -lc '
-  rustup toolchain install nightly --profile minimal --no-self-update
-  rustup default nightly
-  RUSTFLAGS="-Zsanitizer=address" cargo build -p opensearch_extension --release
-'
-```
-
-Only use the produced **`libopensearch_extension.so`** in a test image or local **`mongod`** if you understand sanitizer runtime requirements.
+See [Testing and CI](../TESTING.md) for whole-workspace
+rustfmt, SDK/sys/harness Clippy, unit/property JUnit reports, dependency audit,
+a C ABI harness with UBSan, and ASan-instrumented SDK tests and C/Rust callbacks.
+These checks do not require MongoDB services and do not replace real-server e2e
+tests. Formatting produces logs and diffs only, never JUnit.
 
 ### Common issues
 

@@ -18,5 +18,4 @@ jobs:
 
       - name: Miri on extension-sdk-mongodb (Docker)
         run: |
-          chmod +x e2e-tests/run-miri-docker.sh
-          ./e2e-tests/run-miri-docker.sh
+          bash .github/testing/miri.sh

@@ -6,10 +6,10 @@ use std::mem::ManuallyDrop;
 
 use extension_sdk_mongodb::status;
 use extension_sdk_mongodb::sys::{
-    MongoExtensionAggStageAstNode, MongoExtensionAggStageDescriptor, MongoExtensionAggStageParseNode,
-    MongoExtensionByteView, MongoExtensionHostPortal, MongoExtensionHostPortalVTable,
-    MongoExtensionHostServices, MongoExtensionHostServicesVTable, MongoExtensionLogger,
-    MongoExtensionPipelineRewriteRule, MongoExtensionStatus,
+    MongoExtensionAggStageAstNode, MongoExtensionAggStageDescriptor,
+    MongoExtensionAggStageParseNode, MongoExtensionByteView, MongoExtensionHostPortal,
+    MongoExtensionHostPortalVTable, MongoExtensionHostServices, MongoExtensionHostServicesVTable,
+    MongoExtensionLogger, MongoExtensionPipelineRewriteRule, MongoExtensionStatus,
 };
 use extension_sdk_mongodb::version::EXTENSION_API_VERSION;
 

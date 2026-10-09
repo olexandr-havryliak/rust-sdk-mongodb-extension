@@ -5,6 +5,7 @@ members = [
     "extension-sdk-mongodb",
     "e2e-tests/e2e-extension",
     "e2e-tests/router-lookup-extension",
+    ".github/testing/abi-harness",
     "e2e-tests/mongo-extension-fuzz",
     "examples/fibonacci/fibonacci-extension",
     "examples/http-fetch/http-fetch-extension",

@@ -13,7 +13,10 @@ fn next_advanced_carries_optional_metadata() {
         panic!("expected Advanced");
     };
     assert_eq!(document.get_i32("x").ok(), Some(1));
-    assert_eq!(metadata.as_ref().and_then(|m| m.get_f64("score").ok()), Some(0.9));
+    assert_eq!(
+        metadata.as_ref().and_then(|m| m.get_f64("score").ok()),
+        Some(0.9)
+    );
 }
 
 #[test]
@@ -22,13 +25,7 @@ fn next_advanced_allows_absent_metadata() {
         document: doc! { "a": "b" },
         metadata: None,
     };
-    assert!(matches!(
-        n,
-        Next::Advanced {
-            metadata: None,
-            ..
-        }
-    ));
+    assert!(matches!(n, Next::Advanced { metadata: None, .. }));
 }
 
 #[test]

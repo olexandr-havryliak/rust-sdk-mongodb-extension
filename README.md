@@ -2,7 +2,7 @@
 
 Rust workspace that ships **`extension-sdk-mongodb`**, the **Rust SDK for MongoDB Extensions**: libraries and macros for building **MongoDB server extensions**—`cdylib` plugins loaded by `mongod` that register aggregation stages behind the versioned C ABI in [`include/mongodb_extension_api.h`](include/mongodb_extension_api.h) (vendored from MongoDB’s public extension API).
 
-The same repository also contains **sample extensions** and a **test harness**; those are documented separately so this file stays focused on the SDK crates.
+The same repository also contains **sample extensions**, documented separately so this file stays focused on the SDK crates.
 
 The [OpenSearch mongos example](examples/opensearch-mongos/README.md) runs a
 router-only `$vectorSearch` extension with standard Kafka synchronization and
@@ -10,6 +10,14 @@ full document keys on a two-shard cluster. It is separate from the
 [replica-set example](examples/opensearch/README.md).
 
 **MongoDB Extensions ABI:** this tree targets the vendored C API **version 1.0** (`MONGODB_EXTENSION_API_MAJOR_VERSION` **1**, `MONGODB_EXTENSION_API_MINOR_VERSION` **0** in [`include/mongodb_extension_api.h`](include/mongodb_extension_api.h)). Extensions built with the SDK export `get_mongodb_extension_versions` to advertise that pair, then accept the host-selected version in `get_mongodb_extension` (see [`extension-sdk-mongodb/src/version.rs`](extension-sdk-mongodb/src/version.rs)).
+
+**Host safety contract:** MongoDB guarantees that `HostServices` remains valid for
+the extension lifetime; `HostPortal` is valid only during initialization and is
+not retained. Export macros handle the unsafe FFI boundary, while ordinary stage
+implementations use the safe SDK API. Direct callers of `host::set_host_services`
+or `version::host_supports_extension` must now use `unsafe` and satisfy their
+documented pointer contracts. This changes the low-level Rust API, not MongoDB's
+C ABI. The SDK trusts a host that honors the Extensions API contract.
 
 ## Crates
 
@@ -149,15 +157,13 @@ shards to produce EOF without collection scans. Input-requiring stages retain
 their previous shard input behavior. Raw **`SourceOps`** users set
 **`merging_pipeline: None`** when unused.
 This is a distributed-planning hook, not an unconditional pipeline rewrite.
-See the [experimental mongos-only lookup PoC](e2e-tests/router-lookup/README.md)
-for the verified router-only lookup flow and its current scope.
 
 ## Using the Rust SDK for MongoDB Extensions in your extension
 
 1. Add a path or crates.io dependency on **`extension-sdk-mongodb`**.
 2. Set **`[lib] crate-type = ["cdylib"]`** so the compiler produces a shared library the server can load.
 3. Invoke exactly **one** of the `export_*` macros so the unmangled **`get_mongodb_extension_versions`** and **`get_mongodb_extension`** entry points exist.
-4. Install the produced `*.so` and matching extension **`*.conf`** according to MongoDB’s extension host documentation for your server build. The local Docker harnesses in this repository use the official **`mongodb/mongodb-community-server:9.0-ubi9`** image, **`--extensionsConfigPath /etc/mongo/extensions`**, and **`--loadExtensions ...`**.
+4. Install the produced `*.so` and matching extension **`*.conf`** according to MongoDB’s extension host documentation for your server build.
 
 Minimal passthrough example:
 
@@ -187,7 +193,7 @@ docker run --rm -v "$PWD:/build" -w /build rust:bookworm \
 | Topic | Where |
 |--------|--------|
 | Runnable **demo extensions** (Docker, mongosh, ports) | [`examples/README.md`](examples/README.md) |
-| **Tests**, e2e, fuzz, Miri, scripts, debugging | [`e2e-tests/README.md`](e2e-tests/README.md) |
+| Testing and CI | [`TESTING.md`](TESTING.md) |
 
 ## License
 

@@ -62,7 +62,8 @@ static ERR_VTABLE: MongoExtensionStatusVTable = MongoExtensionStatusVTable {
 
 /// Heap-allocated error status (host will call `destroy`).
 pub fn new_error_status(code: i32, reason: impl Into<String>) -> *mut MongoExtensionStatus {
-    let reason = CString::new(reason.into()).unwrap_or_else(|_| CString::new("extension error").unwrap());
+    let reason =
+        CString::new(reason.into()).unwrap_or_else(|_| CString::new("extension error").unwrap());
     let b = Box::new(OwnedErrorStatus {
         base: MongoExtensionStatus {
             vtable: &ERR_VTABLE,
@@ -119,9 +120,7 @@ static mut OK_PTR: *mut MongoExtensionStatus = std::ptr::null_mut();
 /// Pointer to the process-wide OK status object (`destroy` is a no-op).
 pub fn status_ok() -> *mut MongoExtensionStatus {
     OK_INIT.call_once(|| unsafe {
-        let b = Box::new(MongoExtensionStatus {
-            vtable: &OK_VTABLE,
-        });
+        let b = Box::new(MongoExtensionStatus { vtable: &OK_VTABLE });
         OK_PTR = Box::into_raw(b);
     });
     unsafe { OK_PTR }

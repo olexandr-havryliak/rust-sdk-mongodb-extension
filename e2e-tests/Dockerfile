@@ -4,6 +4,7 @@ ARG MONGO_IMAGE=mongodb/mongodb-community-server:9.0-ubi9
 
 # `bookworm` tracks stable Rust (new enough for current `bson`/`time` deps).
 FROM rust:bookworm AS builder
+ENV CARGO_BUILD_JOBS=2
 WORKDIR /build
 COPY Cargo.lock ./
 COPY extension-sys-mongodb ./extension-sys-mongodb
@@ -44,4 +45,4 @@ RUN mkdir -p /data/db /data/configdb \
     chown -R 999:999 /etc/mongo/extensions /usr/local/lib/mongo-extensions /data/db /data/configdb
 USER 999
 EXPOSE 27017
-CMD ["mongod", "--bind_ip_all", "--setParameter", "featureFlagExtensionsAPI=true", "--setParameter", "featureFlagExtensionsApiSignatureValidation=false", "--extensionsConfigPath", "/etc/mongo/extensions", "--loadExtensions", "opensearch"]
+CMD ["mongod", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25", "--setParameter", "featureFlagExtensionsAPI=true", "--setParameter", "featureFlagExtensionsApiSignatureValidation=false", "--extensionsConfigPath", "/etc/mongo/extensions", "--loadExtensions", "opensearch"]

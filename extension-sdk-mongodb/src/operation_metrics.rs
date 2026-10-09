@@ -42,7 +42,10 @@ unsafe extern "C" fn sdk_met_serialize(
     }
 }
 
-unsafe extern "C" fn sdk_met_update(p: *mut MongoExtensionOperationMetrics, patch: MongoExtensionByteView) -> *mut MongoExtensionStatus {
+unsafe extern "C" fn sdk_met_update(
+    p: *mut MongoExtensionOperationMetrics,
+    patch: MongoExtensionByteView,
+) -> *mut MongoExtensionStatus {
     let this = p.cast::<SdkOperationMetrics>();
     if patch.data.is_null() || patch.len == 0 {
         return status::status_ok();
@@ -59,11 +62,12 @@ unsafe extern "C" fn sdk_met_update(p: *mut MongoExtensionOperationMetrics, patc
     status::status_ok()
 }
 
-static SDK_METRICS_VTABLE: MongoExtensionOperationMetricsVTable = MongoExtensionOperationMetricsVTable {
-    destroy: sdk_met_destroy,
-    serialize: sdk_met_serialize,
-    update: sdk_met_update,
-};
+static SDK_METRICS_VTABLE: MongoExtensionOperationMetricsVTable =
+    MongoExtensionOperationMetricsVTable {
+        destroy: sdk_met_destroy,
+        serialize: sdk_met_serialize,
+        update: sdk_met_update,
+    };
 
 pub(crate) fn alloc_sdk_operation_metrics() -> *mut MongoExtensionOperationMetrics {
     let m = Box::new(SdkOperationMetrics {

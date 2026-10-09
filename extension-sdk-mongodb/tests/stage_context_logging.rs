@@ -7,8 +7,8 @@ use extension_sdk_mongodb::stage_context::StageContext;
 use extension_sdk_mongodb::status;
 use extension_sdk_mongodb::sys::{
     MongoExtensionHostServices, MongoExtensionHostServicesVTable, MongoExtensionLogMessage,
-    MongoExtensionLogger, MongoExtensionLoggerVTable, MongoExtensionLogSeverity, MongoExtensionLogType,
-    MongoExtensionStatus,
+    MongoExtensionLogSeverity, MongoExtensionLogType, MongoExtensionLogger,
+    MongoExtensionLoggerVTable, MongoExtensionStatus,
 };
 
 static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -43,9 +43,7 @@ struct MockLogger {
 }
 
 static mut MOCK_LOGGER: MockLogger = MockLogger {
-    base: MongoExtensionLogger {
-        vtable: &LOGGER_VT,
-    },
+    base: MongoExtensionLogger { vtable: &LOGGER_VT },
 };
 
 unsafe extern "C" fn mock_get_logger() -> *mut MongoExtensionLogger {
@@ -88,7 +86,7 @@ unsafe extern "C" fn mock_create_id(
 #[test]
 fn stage_context_log_info_forwards_to_host_logger() {
     CAPTURED.lock().expect("cap").clear();
-    host::set_host_services(std::ptr::null());
+    unsafe { host::set_host_services(std::ptr::null()) };
 
     static SVCS_VT: MongoExtensionHostServicesVTable = MongoExtensionHostServicesVTable {
         get_logger: mock_get_logger,
@@ -98,10 +96,9 @@ fn stage_context_log_info_forwards_to_host_logger() {
         create_host_agg_stage_parse_node: mock_create_parse,
         create_id_lookup: mock_create_id,
     };
-    let svcs = MongoExtensionHostServices {
-        vtable: &SVCS_VT,
-    };
-    host::set_host_services(std::ptr::from_ref(&svcs));
+    let svcs = MongoExtensionHostServices { vtable: &SVCS_VT };
+    // SAFETY: svcs is readable here and its callback table has static storage.
+    unsafe { host::set_host_services(std::ptr::from_ref(&svcs)) };
 
     let mut ctx = StageContext::new();
     ctx.log_info("hello-sdk");

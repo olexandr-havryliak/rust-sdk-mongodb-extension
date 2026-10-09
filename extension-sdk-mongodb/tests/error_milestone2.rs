@@ -56,7 +56,10 @@ fn into_raw_status_runtime_uses_default_code() {
     assert!(!p.is_null());
     unsafe {
         let vt = (*p).vtable;
-        assert_eq!(((*vt).get_code)(p), extension_sdk_mongodb::sys::MONGO_EXTENSION_STATUS_RUNTIME_ERROR);
+        assert_eq!(
+            ((*vt).get_code)(p),
+            extension_sdk_mongodb::sys::MONGO_EXTENSION_STATUS_RUNTIME_ERROR
+        );
         ((*vt).destroy)(p);
     }
 }

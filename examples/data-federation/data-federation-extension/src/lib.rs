@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 
 use bson::Document;
 use extension_sdk_mongodb::{
-    export_source_stage, parse_args, ExtensionError, ExtensionResult, Next, SourceStage, StageContext,
+    export_source_stage, parse_args, ExtensionError, ExtensionResult, Next, SourceStage,
+    StageContext,
 };
 use serde::Deserialize;
 
@@ -48,13 +49,13 @@ struct ExtensionOptionsJson {
 
 /// Parse extension options from raw bytes (JSON object or simple `key: value` lines).
 pub fn parse_extension_options(raw: &[u8]) -> ExtensionResult<JsonlExtensionConfig> {
-    let text = std::str::from_utf8(raw)
-        .map_err(|e| ExtensionError::Runtime(format!("extension options are not valid UTF-8: {e}")))?;
+    let text = std::str::from_utf8(raw).map_err(|e| {
+        ExtensionError::Runtime(format!("extension options are not valid UTF-8: {e}"))
+    })?;
     let t = text.trim();
     if t.starts_with('{') {
-        let j: ExtensionOptionsJson = serde_json::from_str(t).map_err(|e| {
-            ExtensionError::Runtime(format!("extension options JSON: {e}"))
-        })?;
+        let j: ExtensionOptionsJson = serde_json::from_str(t)
+            .map_err(|e| ExtensionError::Runtime(format!("extension options JSON: {e}")))?;
         let root = j
             .allowed_root
             .as_deref()
@@ -156,9 +157,8 @@ pub fn resolve_under_allowed_root(
 ) -> ExtensionResult<PathBuf> {
     validate_stage_relative_path(rel)?;
     let rel = rel.trim();
-    let root = fs::canonicalize(&cfg.allowed_root).map_err(|e| {
-        ExtensionError::Runtime(format!("allowedRoot is not accessible: {e}"))
-    })?;
+    let root = fs::canonicalize(&cfg.allowed_root)
+        .map_err(|e| ExtensionError::Runtime(format!("allowedRoot is not accessible: {e}")))?;
     let mut cur = root.clone();
     for part in rel.split('/') {
         if part.is_empty() {
@@ -183,9 +183,8 @@ pub fn resolve_under_allowed_root(
         }
         cur.push(part);
     }
-    let final_path = fs::canonicalize(&cur).map_err(|e| {
-        ExtensionError::Runtime(format!("could not canonicalize target path: {e}"))
-    })?;
+    let final_path = fs::canonicalize(&cur)
+        .map_err(|e| ExtensionError::Runtime(format!("could not canonicalize target path: {e}")))?;
     if !final_path.starts_with(&root) {
         return Err(ExtensionError::BadValue(
             "resolved path escapes allowedRoot".into(),
@@ -220,17 +219,15 @@ pub fn parse_jsonl_object_line(
     physical_line_no: u64,
     max_document_bytes: u64,
 ) -> ExtensionResult<Document> {
-    let v: serde_json::Value = serde_json::from_str(line).map_err(|e| {
-        ExtensionError::FailedToParse(format!("line {physical_line_no}: {e}"))
-    })?;
+    let v: serde_json::Value = serde_json::from_str(line)
+        .map_err(|e| ExtensionError::FailedToParse(format!("line {physical_line_no}: {e}")))?;
     if !v.is_object() {
         return Err(ExtensionError::BadValue(format!(
             "line {physical_line_no}: JSON value must be an object, not array/scalar"
         )));
     }
-    let doc = bson::to_document(&v).map_err(|e| {
-        ExtensionError::FailedToParse(format!("line {physical_line_no}: {e}"))
-    })?;
+    let doc = bson::to_document(&v)
+        .map_err(|e| ExtensionError::FailedToParse(format!("line {physical_line_no}: {e}")))?;
     let len = bson_encoded_len(&doc);
     if len as u64 > max_document_bytes {
         return Err(ExtensionError::BadValue(format!(
@@ -251,7 +248,9 @@ fn read_jsonl_physical_line(
     let mut nread: u64 = 0;
     loop {
         let mut b = [0u8; 1];
-        let got = reader.read(&mut b).map_err(|e| ExtensionError::Runtime(format!("read: {e}")))?;
+        let got = reader
+            .read(&mut b)
+            .map_err(|e| ExtensionError::Runtime(format!("read: {e}")))?;
         if got == 0 {
             if line_buf.is_empty() {
                 return Ok(None);
@@ -330,10 +329,7 @@ impl SourceStage for ReadLocalJsonl {
                 return Err(e);
             }
         };
-        ctx.log_info(&format!(
-            "readLocalJsonl: opening {}",
-            resolved.display()
-        ));
+        ctx.log_info(&format!("readLocalJsonl: opening {}", resolved.display()));
         let file = open_file_for_read(&resolved, cfg.allow_symlinks)?;
         let reader = BufReader::new(file);
         Ok(ReadLocalJsonlState {
@@ -374,8 +370,7 @@ impl SourceStage for ReadLocalJsonl {
             }
             state.physical_line_no = state.physical_line_no.saturating_add(1);
             let line_no = state.physical_line_no;
-            ctx.metrics()
-                .inc("bytes_read", state.line_buf.len() as i64);
+            ctx.metrics().inc("bytes_read", state.line_buf.len() as i64);
             ctx.metrics().inc("lines_read", 1);
             let text = std::str::from_utf8(&state.line_buf).map_err(|e| {
                 ExtensionError::BadValue(format!("line {line_no}: not valid UTF-8: {e}"))
@@ -454,7 +449,8 @@ mod tests {
 
     #[test]
     fn parse_accepts_path_and_max_documents() {
-        let a = ReadLocalJsonl::parse(doc! { "path": "a.jsonl", "maxDocuments": 5i64 }).expect("parse");
+        let a =
+            ReadLocalJsonl::parse(doc! { "path": "a.jsonl", "maxDocuments": 5i64 }).expect("parse");
         assert_eq!(a.path, "a.jsonl");
         assert_eq!(a.max_documents, Some(5));
     }
@@ -478,19 +474,22 @@ mod tests {
 
         #[test]
         fn max_documents_int32() {
-            let a = ReadLocalJsonl::parse(doc! { "path": "x.jsonl", "maxDocuments": 99i32 }).expect("parse");
+            let a = ReadLocalJsonl::parse(doc! { "path": "x.jsonl", "maxDocuments": 99i32 })
+                .expect("parse");
             assert_eq!(a.max_documents, Some(99));
         }
 
         #[test]
         fn max_documents_negative_rejected() {
-            let e = ReadLocalJsonl::parse(doc! { "path": "x.jsonl", "maxDocuments": -1i64 }).unwrap_err();
+            let e = ReadLocalJsonl::parse(doc! { "path": "x.jsonl", "maxDocuments": -1i64 })
+                .unwrap_err();
             assert!(matches!(e, ExtensionError::FailedToParse(_)));
         }
 
         #[test]
         fn max_documents_zero_allowed() {
-            let a = ReadLocalJsonl::parse(doc! { "path": "x.jsonl", "maxDocuments": 0i64 }).expect("parse");
+            let a = ReadLocalJsonl::parse(doc! { "path": "x.jsonl", "maxDocuments": 0i64 })
+                .expect("parse");
             assert_eq!(a.max_documents, Some(0));
         }
 
@@ -653,7 +652,8 @@ mod tests {
 
     #[test]
     fn parse_extension_options_yaml_only_shared_library_path_defaults_allowed_root() {
-        let y = "sharedLibraryPath: /usr/local/lib/mongo-extensions/libdata_federation_extension.so\n";
+        let y =
+            "sharedLibraryPath: /usr/local/lib/mongo-extensions/libdata_federation_extension.so\n";
         let c = parse_extension_options(y.as_bytes()).expect("parse");
         assert_eq!(c.allowed_root, PathBuf::from(DEMO_ALLOWED_ROOT));
         assert!(!c.allow_symlinks);

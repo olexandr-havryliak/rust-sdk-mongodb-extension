@@ -43,7 +43,10 @@ impl Expansion {
 
     /// Validates that each stage document has exactly one key equal to **`stage_name`** and returns
     /// serialized inner argument blobs (same wire shape as stored on the parse node).
-    pub fn pipeline_stage_arg_blobs(stage_name: &str, pipeline: &[Document]) -> Result<Vec<Vec<u8>>> {
+    pub fn pipeline_stage_arg_blobs(
+        stage_name: &str,
+        pipeline: &[Document],
+    ) -> Result<Vec<Vec<u8>>> {
         if pipeline.is_empty() {
             return Err(ExtensionError::BadValue(
                 "expanded pipeline must not be empty".into(),

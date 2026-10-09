@@ -4,6 +4,7 @@
 
 services:
   mongo:
+    cpus: 2
     build:
       context: ..
       dockerfile: e2e-tests/Dockerfile
@@ -28,6 +29,7 @@ services:
   # Random aggregation driver against `mongo` (profile "fuzz" — not started by default `up`).
   # Example: ITERATIONS=2000 ./e2e-tests/run-fuzz-e2e.sh
   fuzz:
+    cpus: 2
     image: rust:bookworm
     profiles: ["fuzz"]
     depends_on:
@@ -37,6 +39,7 @@ services:
     volumes:
       - ..:/build
     environment:
+      CARGO_BUILD_JOBS: "2"
       MONGODB_URI: mongodb://mongo:27017
       ITERATIONS: "${ITERATIONS:-5000}"
       SEED: "${SEED:-}"

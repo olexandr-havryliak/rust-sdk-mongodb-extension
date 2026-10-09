@@ -16,30 +16,35 @@ use bson::Document;
 use crate::byte_buf;
 use crate::error::ExtensionError;
 use crate::expansion::Expansion;
-use crate::stage_model::StagePlan;
-use crate::stage_properties::{HostTypeRequirement, StageProperties};
 use crate::host;
 use crate::panics::ffi_boundary;
 use crate::stage_context::{CatalogContext, StageContext};
+use crate::stage_model::StagePlan;
 use crate::stage_output::Next;
+use crate::stage_properties::{HostTypeRequirement, StageProperties};
 use crate::status;
 use crate::sys::{
     MongoExtension, MongoExtensionAggStageAstNode, MongoExtensionAggStageAstNodeVTable,
     MongoExtensionAggStageDescriptor, MongoExtensionAggStageDescriptorVTable,
-    MongoExtensionAggStageParseNode, MongoExtensionAggStageParseNodeVTable, MongoExtensionAggStageNodeType,
-    MongoExtensionByteContainer, MongoExtensionByteContainerBytes, MongoExtensionByteContainerType,
-    MongoExtensionByteView, MongoExtensionCatalogContext, MongoExtensionClientType,
-    MongoExtensionDistributedPlanLogic,
+    MongoExtensionAggStageNodeType, MongoExtensionAggStageParseNode,
+    MongoExtensionAggStageParseNodeVTable, MongoExtensionByteContainer,
+    MongoExtensionByteContainerBytes, MongoExtensionByteContainerType, MongoExtensionByteView,
+    MongoExtensionCatalogContext, MongoExtensionClientType, MongoExtensionDistributedPlanLogic,
     MongoExtensionExecAggStage, MongoExtensionExecAggStageVTable, MongoExtensionExpandedArray,
     MongoExtensionExpandedArrayContainer, MongoExtensionExpandedArrayContainerVTable,
     MongoExtensionExpandedArrayElementUnion, MongoExtensionExplainVerbosity,
     MongoExtensionFirstStageViewApplicationPolicy, MongoExtensionGetNextResult,
-    MongoExtensionGetNextResultCode, MongoExtensionLogicalAggStage, MongoExtensionLogicalAggStageVTable,
-    MongoExtensionOperationMetrics, MongoExtensionPipelineDependencies,
-    MongoExtensionPipelineRewriteContext, MongoExtensionQueryExecutionContext, MongoExtensionStatus,
-    MongoExtensionStreamType, MongoExtensionVTable, MongoExtensionViewInfo,
+    MongoExtensionGetNextResultCode, MongoExtensionLogicalAggStage,
+    MongoExtensionLogicalAggStageVTable, MongoExtensionOperationMetrics,
+    MongoExtensionPipelineDependencies, MongoExtensionPipelineRewriteContext,
+    MongoExtensionQueryExecutionContext, MongoExtensionStatus, MongoExtensionStreamType,
+    MongoExtensionVTable, MongoExtensionViewInfo,
 };
 use crate::version::{supports_selected_version, EXTENSION_API_VERSION};
+
+/// Builds the merger suffix from source arguments and the bound namespace.
+pub type MergingPipeline =
+    fn(Document, Option<&CatalogContext>) -> crate::error::Result<Option<Vec<Document>>>;
 
 /// Erased hooks for a concrete [`SourceStage`], installed once per extension via
 /// [`export_source_stage!`](crate::export_source_stage).
@@ -62,7 +67,7 @@ pub struct SourceOps {
     /// Parse-time expansion from the inner args document (after BSON decode from the parse node).
     pub expand_inner: fn(Document) -> crate::error::Result<Expansion>,
     /// Optional post-bind merger suffix; the SDK prepends a clone of this source.
-    pub merging_pipeline: Option<fn(Document, Option<&CatalogContext>) -> crate::error::Result<Option<Vec<Document>>>>,
+    pub merging_pipeline: Option<MergingPipeline>,
 }
 
 fn name_view(ops: &SourceOps) -> MongoExtensionByteView {
@@ -131,7 +136,9 @@ struct DescriptorObj {
     ops: &'static SourceOps,
 }
 
-unsafe extern "C" fn desc_get_name(d: *const MongoExtensionAggStageDescriptor) -> MongoExtensionByteView {
+unsafe extern "C" fn desc_get_name(
+    d: *const MongoExtensionAggStageDescriptor,
+) -> MongoExtensionByteView {
     let this = d.cast::<DescriptorObj>();
     name_view((*this).ops)
 }
@@ -148,35 +155,38 @@ unsafe extern "C" fn desc_parse(
     out_parse: *mut *mut MongoExtensionAggStageParseNode,
 ) -> *mut MongoExtensionStatus {
     *out_parse = std::ptr::null_mut();
-    let parsed = ffi_boundary(|| -> crate::error::Result<*mut MongoExtensionAggStageParseNode> {
-        let bytes = std::slice::from_raw_parts(stage_bson.data, stage_bson.len as usize);
-        let doc = Document::from_reader(bytes)
-            .map_err(|e| ExtensionError::FailedToParse(format!("parse bson: {e}")))?;
-        let this = descriptor.cast::<DescriptorObj>();
-        let g = (*this).ops;
-        let key = doc.keys().next().ok_or_else(|| {
-            ExtensionError::BadValue("stage document must have one field".into())
-        })?;
-        if key != g.name {
-            return Err(ExtensionError::BadValue(format!(
-                "expected stage {}, got {key}",
-                g.name
-            )));
-        }
-        let args = doc
-            .get_document(key)
-            .map_err(|e| ExtensionError::BadValue(e.to_string()))?;
-        if g.expect_empty && !args.is_empty() {
-            return Err(ExtensionError::BadValue(
-                "stage definition must be an empty object".into(),
-            ));
-        }
-        let mut arg_bytes = Vec::new();
-        args.to_writer(&mut arg_bytes)
-            .map_err(|e| ExtensionError::FailedToParse(e.to_string()))?;
-        let p = Box::into_raw(Box::new(parse_alloc(arg_bytes, g))).cast::<MongoExtensionAggStageParseNode>();
-        Ok(p)
-    });
+    let parsed = ffi_boundary(
+        || -> crate::error::Result<*mut MongoExtensionAggStageParseNode> {
+            let bytes = std::slice::from_raw_parts(stage_bson.data, stage_bson.len as usize);
+            let doc = Document::from_reader(bytes)
+                .map_err(|e| ExtensionError::FailedToParse(format!("parse bson: {e}")))?;
+            let this = descriptor.cast::<DescriptorObj>();
+            let g = (*this).ops;
+            let key = doc.keys().next().ok_or_else(|| {
+                ExtensionError::BadValue("stage document must have one field".into())
+            })?;
+            if key != g.name {
+                return Err(ExtensionError::BadValue(format!(
+                    "expected stage {}, got {key}",
+                    g.name
+                )));
+            }
+            let args = doc
+                .get_document(key)
+                .map_err(|e| ExtensionError::BadValue(e.to_string()))?;
+            if g.expect_empty && !args.is_empty() {
+                return Err(ExtensionError::BadValue(
+                    "stage definition must be an empty object".into(),
+                ));
+            }
+            let mut arg_bytes = Vec::new();
+            args.to_writer(&mut arg_bytes)
+                .map_err(|e| ExtensionError::FailedToParse(e.to_string()))?;
+            let p = Box::into_raw(Box::new(parse_alloc(arg_bytes, g)))
+                .cast::<MongoExtensionAggStageParseNode>();
+            Ok(p)
+        },
+    );
     match parsed {
         None => ExtensionError::Runtime("extension panic during parse".into()).into_raw_status(),
         Some(Err(e)) => e.into_raw_status(),
@@ -187,11 +197,12 @@ unsafe extern "C" fn desc_parse(
     }
 }
 
-static DESCRIPTOR_VTABLE: MongoExtensionAggStageDescriptorVTable = MongoExtensionAggStageDescriptorVTable {
-    get_name: desc_get_name,
-    get_client_type: desc_get_client_type,
-    parse: desc_parse,
-};
+static DESCRIPTOR_VTABLE: MongoExtensionAggStageDescriptorVTable =
+    MongoExtensionAggStageDescriptorVTable {
+        get_name: desc_get_name,
+        get_client_type: desc_get_client_type,
+        parse: desc_parse,
+    };
 
 // --- Parse node ---
 
@@ -219,7 +230,9 @@ unsafe extern "C" fn parse_destroy(p: *mut MongoExtensionAggStageParseNode) {
     drop(Box::from_raw(p.cast::<ParseObj>()));
 }
 
-unsafe extern "C" fn parse_get_name(p: *const MongoExtensionAggStageParseNode) -> MongoExtensionByteView {
+unsafe extern "C" fn parse_get_name(
+    p: *const MongoExtensionAggStageParseNode,
+) -> MongoExtensionByteView {
     let this = p.cast::<ParseObj>();
     name_view((*this).ops)
 }
@@ -230,15 +243,17 @@ unsafe extern "C" fn parse_get_query_shape(
     out: *mut *mut crate::sys::MongoExtensionByteBuf,
 ) -> *mut MongoExtensionStatus {
     *out = std::ptr::null_mut();
-    let r = ffi_boundary(|| -> crate::error::Result<*mut crate::sys::MongoExtensionByteBuf> {
-        let this = p.cast::<ParseObj>();
-        let g = (*this).ops;
-        let args_bytes: &[u8] = unsafe { &(*this).args };
-        let args = Document::from_reader(args_bytes)
-            .map_err(|e| ExtensionError::FailedToParse(e.to_string()))?;
-        let d = bson::doc! { g.name: args };
-        byte_buf::from_bson(&d).map_err(|e| ExtensionError::FailedToParse(e.to_string()))
-    });
+    let r = ffi_boundary(
+        || -> crate::error::Result<*mut crate::sys::MongoExtensionByteBuf> {
+            let this = p.cast::<ParseObj>();
+            let g = (*this).ops;
+            let args_bytes: &[u8] = unsafe { &(*this).args };
+            let args = Document::from_reader(args_bytes)
+                .map_err(|e| ExtensionError::FailedToParse(e.to_string()))?;
+            let d = bson::doc! { g.name: args };
+            byte_buf::from_bson(&d).map_err(|e| ExtensionError::FailedToParse(e.to_string()))
+        },
+    );
     match r {
         None => ExtensionError::Runtime("panic during get_query_shape".into()).into_raw_status(),
         Some(Err(e)) => e.into_raw_status(),
@@ -254,51 +269,53 @@ unsafe extern "C" fn parse_expand(
     out: *mut *mut MongoExtensionExpandedArrayContainer,
 ) -> *mut MongoExtensionStatus {
     *out = std::ptr::null_mut();
-    let r = ffi_boundary(|| -> crate::error::Result<*mut MongoExtensionExpandedArrayContainer> {
-        let this = p.cast::<ParseObj>();
-        let args_bytes = (*this).args.clone();
-        let args_doc = Document::from_reader(args_bytes.as_slice())
-            .map_err(|e| ExtensionError::FailedToParse(e.to_string()))?;
-        let g = (*this).ops;
-        let ex = (g.expand_inner)(args_doc)?;
-        match ex {
-            Expansion::SelfStage => {
-                let ast =
-                    Box::into_raw(Box::new(ast_alloc(args_bytes, g))).cast::<MongoExtensionAggStageAstNode>();
-                let c = Box::new(expanded_single(ast));
-                Ok(Box::into_raw(c).cast::<MongoExtensionExpandedArrayContainer>())
-            }
-            Expansion::Pipeline(docs) => {
-                let blobs = Expansion::pipeline_stage_arg_blobs(g.name, &docs)?;
-                let mut asts: Vec<*mut MongoExtensionAggStageAstNode> =
-                    Vec::with_capacity(blobs.len());
-                for b in blobs {
-                    asts.push(
-                        Box::into_raw(Box::new(ast_alloc(b, g))).cast::<MongoExtensionAggStageAstNode>(),
-                    );
+    let r = ffi_boundary(
+        || -> crate::error::Result<*mut MongoExtensionExpandedArrayContainer> {
+            let this = p.cast::<ParseObj>();
+            let args_bytes = (*this).args.clone();
+            let args_doc = Document::from_reader(args_bytes.as_slice())
+                .map_err(|e| ExtensionError::FailedToParse(e.to_string()))?;
+            let g = (*this).ops;
+            let ex = (g.expand_inner)(args_doc)?;
+            match ex {
+                Expansion::SelfStage => {
+                    let ast = Box::into_raw(Box::new(ast_alloc(args_bytes, g)))
+                        .cast::<MongoExtensionAggStageAstNode>();
+                    let c = Box::new(expanded_single(ast));
+                    Ok(Box::into_raw(c).cast::<MongoExtensionExpandedArrayContainer>())
                 }
-                let c = Box::new(expanded_multi(asts));
-                Ok(Box::into_raw(c).cast::<MongoExtensionExpandedArrayContainer>())
+                Expansion::Pipeline(docs) => {
+                    let blobs = Expansion::pipeline_stage_arg_blobs(g.name, &docs)?;
+                    let mut asts: Vec<*mut MongoExtensionAggStageAstNode> =
+                        Vec::with_capacity(blobs.len());
+                    for b in blobs {
+                        asts.push(
+                            Box::into_raw(Box::new(ast_alloc(b, g)))
+                                .cast::<MongoExtensionAggStageAstNode>(),
+                        );
+                    }
+                    let c = Box::new(expanded_multi(asts));
+                    Ok(Box::into_raw(c).cast::<MongoExtensionExpandedArrayContainer>())
+                }
+                Expansion::WithHostIdLookup {
+                    extension_stage,
+                    id_lookup,
+                } => {
+                    let blobs = Expansion::pipeline_stage_arg_blobs(g.name, &[extension_stage])?;
+                    let extension_ast = Box::into_raw(Box::new(ast_alloc(
+                        blobs.into_iter().next().ok_or_else(|| {
+                            ExtensionError::BadValue("missing extension stage".into())
+                        })?,
+                        g,
+                    )))
+                    .cast::<MongoExtensionAggStageAstNode>();
+                    let id_lookup_ast = host::create_id_lookup_ast(&id_lookup)?;
+                    let c = Box::new(expanded_multi(vec![extension_ast, id_lookup_ast]));
+                    Ok(Box::into_raw(c).cast::<MongoExtensionExpandedArrayContainer>())
+                }
             }
-            Expansion::WithHostIdLookup {
-                extension_stage,
-                id_lookup,
-            } => {
-                let blobs = Expansion::pipeline_stage_arg_blobs(g.name, &[extension_stage])?;
-                let extension_ast = Box::into_raw(Box::new(ast_alloc(
-                    blobs
-                        .into_iter()
-                        .next()
-                        .ok_or_else(|| ExtensionError::BadValue("missing extension stage".into()))?,
-                    g,
-                )))
-                .cast::<MongoExtensionAggStageAstNode>();
-                let id_lookup_ast = host::create_id_lookup_ast(&id_lookup)?;
-                let c = Box::new(expanded_multi(vec![extension_ast, id_lookup_ast]));
-                Ok(Box::into_raw(c).cast::<MongoExtensionExpandedArrayContainer>())
-            }
-        }
-    });
+        },
+    );
     match r {
         None => ExtensionError::Runtime("panic during expand".into()).into_raw_status(),
         Some(Err(e)) => e.into_raw_status(),
@@ -314,7 +331,8 @@ unsafe extern "C" fn parse_clone(
     out: *mut *mut MongoExtensionAggStageParseNode,
 ) -> *mut MongoExtensionStatus {
     let this = p.cast::<ParseObj>();
-    let c = Box::into_raw(Box::new(parse_alloc((*this).args.clone(), (*this).ops))).cast::<MongoExtensionAggStageParseNode>();
+    let c = Box::into_raw(Box::new(parse_alloc((*this).args.clone(), (*this).ops)))
+        .cast::<MongoExtensionAggStageParseNode>();
     *out = c;
     status::status_ok()
 }
@@ -346,14 +364,15 @@ unsafe extern "C" fn parse_to_bson_for_log(
     }
 }
 
-static PARSE_VTABLE: MongoExtensionAggStageParseNodeVTable = MongoExtensionAggStageParseNodeVTable {
-    destroy: parse_destroy,
-    get_name: parse_get_name,
-    get_query_shape: parse_get_query_shape,
-    expand: parse_expand,
-    clone: parse_clone,
-    to_bson_for_log: parse_to_bson_for_log,
-};
+static PARSE_VTABLE: MongoExtensionAggStageParseNodeVTable =
+    MongoExtensionAggStageParseNodeVTable {
+        destroy: parse_destroy,
+        get_name: parse_get_name,
+        get_query_shape: parse_get_query_shape,
+        expand: parse_expand,
+        clone: parse_clone,
+        to_bson_for_log: parse_to_bson_for_log,
+    };
 
 // --- Expanded array ---
 
@@ -514,7 +533,9 @@ unsafe extern "C" fn ast_ext_destroy(p: *mut MongoExtensionAggStageAstNode) {
     ast_destroy(p);
 }
 
-unsafe extern "C" fn ast_get_name(p: *const MongoExtensionAggStageAstNode) -> MongoExtensionByteView {
+unsafe extern "C" fn ast_get_name(
+    p: *const MongoExtensionAggStageAstNode,
+) -> MongoExtensionByteView {
     let this = p.cast::<AstObj>();
     name_view((*this).ops)
 }
@@ -558,7 +579,8 @@ unsafe extern "C" fn ast_clone(
     out: *mut *mut MongoExtensionAggStageAstNode,
 ) -> *mut MongoExtensionStatus {
     let this = p.cast::<AstObj>();
-    let n = Box::into_raw(Box::new(ast_alloc((*this).args.clone(), (*this).ops))).cast::<MongoExtensionAggStageAstNode>();
+    let n = Box::into_raw(Box::new(ast_alloc((*this).args.clone(), (*this).ops)))
+        .cast::<MongoExtensionAggStageAstNode>();
     *out = n;
     status::status_ok()
 }
@@ -599,7 +621,11 @@ struct LogicalObj {
     plan_applied: bool,
 }
 
-fn logical_alloc(args: Vec<u8>, catalog: Option<CatalogContext>, ops: &'static SourceOps) -> LogicalObj {
+fn logical_alloc(
+    args: Vec<u8>,
+    catalog: Option<CatalogContext>,
+    ops: &'static SourceOps,
+) -> LogicalObj {
     LogicalObj {
         base: MongoExtensionLogicalAggStage {
             vtable: &LOGICAL_VTABLE,
@@ -619,7 +645,9 @@ unsafe fn string_from_view(view: MongoExtensionByteView) -> Option<String> {
     Some(String::from_utf8_lossy(bytes).into_owned())
 }
 
-unsafe fn catalog_context_from_raw(ctx: *const MongoExtensionCatalogContext) -> Option<CatalogContext> {
+unsafe fn catalog_context_from_raw(
+    ctx: *const MongoExtensionCatalogContext,
+) -> Option<CatalogContext> {
     if ctx.is_null() {
         return None;
     }
@@ -641,7 +669,9 @@ unsafe extern "C" fn log_destroy(p: *mut MongoExtensionLogicalAggStage) {
     drop(Box::from_raw(p.cast::<LogicalObj>()));
 }
 
-unsafe extern "C" fn log_get_name(p: *const MongoExtensionLogicalAggStage) -> MongoExtensionByteView {
+unsafe extern "C" fn log_get_name(
+    p: *const MongoExtensionLogicalAggStage,
+) -> MongoExtensionByteView {
     let this = p.cast::<LogicalObj>();
     name_view((*this).ops)
 }
@@ -702,24 +732,40 @@ unsafe extern "C" fn log_dpl(
     out: *mut *mut MongoExtensionDistributedPlanLogic,
 ) -> *mut MongoExtensionStatus {
     *out = std::ptr::null_mut();
-    let result = ffi_boundary(|| -> crate::error::Result<Option<*mut MongoExtensionDistributedPlanLogic>> {
-        let this = &*p.cast::<LogicalObj>();
-        if this.plan_applied { return Ok(None); }
-        let Some(hook) = this.ops.merging_pipeline else { return Ok(None); };
-        let args = Document::from_reader(this.args.as_slice())
-            .map_err(|e| ExtensionError::FailedToParse(e.to_string()))?;
-        let Some(suffix) = hook(args, this.catalog.as_ref())? else { return Ok(None); };
-        let mut cloned = logical_alloc(this.args.clone(), this.catalog.clone(), this.ops);
-        cloned.plan_applied = true;
-        let source = crate::distributed_plan::OwnedStage::logical(Box::into_raw(Box::new(cloned)).cast());
-        let suppress_input = !(this.ops.static_properties_doc)()
-            .get_bool("requiresInputDocSource").unwrap_or(true);
-        crate::distributed_plan::build_merger(source, suffix, suppress_input).map(Some)
-    });
+    let result = ffi_boundary(
+        || -> crate::error::Result<Option<*mut MongoExtensionDistributedPlanLogic>> {
+            let this = &*p.cast::<LogicalObj>();
+            if this.plan_applied {
+                return Ok(None);
+            }
+            let Some(hook) = this.ops.merging_pipeline else {
+                return Ok(None);
+            };
+            let args = Document::from_reader(this.args.as_slice())
+                .map_err(|e| ExtensionError::FailedToParse(e.to_string()))?;
+            let Some(suffix) = hook(args, this.catalog.as_ref())? else {
+                return Ok(None);
+            };
+            let mut cloned = logical_alloc(this.args.clone(), this.catalog.clone(), this.ops);
+            cloned.plan_applied = true;
+            let source = crate::distributed_plan::OwnedStage::logical(
+                Box::into_raw(Box::new(cloned)).cast(),
+            );
+            let suppress_input = !(this.ops.static_properties_doc)()
+                .get_bool("requiresInputDocSource")
+                .unwrap_or(true);
+            crate::distributed_plan::build_merger(source, suffix, suppress_input).map(Some)
+        },
+    );
     match result {
-        Some(Ok(plan)) => { *out = plan.unwrap_or(std::ptr::null_mut()); status::status_ok() }
+        Some(Ok(plan)) => {
+            *out = plan.unwrap_or(std::ptr::null_mut());
+            status::status_ok()
+        }
         Some(Err(e)) => e.into_raw_status(),
-        None => ExtensionError::Runtime("panic during distributed planning".into()).into_raw_status(),
+        None => {
+            ExtensionError::Runtime("panic during distributed planning".into()).into_raw_status()
+        }
     }
 }
 
@@ -897,12 +943,17 @@ unsafe extern "C" fn exec_get_next(
 
     if (*this).mode.get() == MODE_INIT {
         let requires_input = ffi_boundary(|| {
-            ((*this).ops.static_properties_doc)().get_bool("requiresInputDocSource").unwrap_or(true)
+            ((*this).ops.static_properties_doc)()
+                .get_bool("requiresInputDocSource")
+                .unwrap_or(true)
         });
         match requires_input {
             Some(false) => (*this).mode.set(MODE_GENERATOR),
-            Some(true) => {},
-            None => return ExtensionError::Runtime("panic during source properties".into()).into_raw_status(),
+            Some(true) => {}
+            None => {
+                return ExtensionError::Runtime("panic during source properties".into())
+                    .into_raw_status()
+            }
         }
     }
 
@@ -937,7 +988,9 @@ unsafe extern "C" fn exec_get_next(
             (*this).mode.set(MODE_PASSTHROUGH);
             return status::status_ok();
         }
-        if (*res).code == MongoExtensionGetNextResultCode::kEOF && !(*this).saw_upstream_advanced.get() {
+        if (*res).code == MongoExtensionGetNextResultCode::kEOF
+            && !(*this).saw_upstream_advanced.get()
+        {
             (*this).mode.set(MODE_GENERATOR);
             // Fall through to generator using stage args (empty collection / no rows).
         } else {
@@ -1021,7 +1074,9 @@ unsafe extern "C" fn exec_get_next(
         Ok(())
     });
     match gen {
-        None => ExtensionError::Runtime("panic during source stage get_next".into()).into_raw_status(),
+        None => {
+            ExtensionError::Runtime("panic during source stage get_next".into()).into_raw_status()
+        }
         Some(Err(e)) => e.into_raw_status(),
         Some(Ok(())) => status::status_ok(),
     }
@@ -1122,10 +1177,7 @@ unsafe extern "C" fn ext_init(
             if let Some(init) = descriptor.ops.on_extension_initialized {
                 unsafe { init(portal)? };
             }
-            let st = host::register_stage_descriptor(
-                portal,
-                std::ptr::addr_of!(descriptor.base),
-            );
+            let st = host::register_stage_descriptor(portal, std::ptr::addr_of!(descriptor.base));
             if st.is_null() {
                 return Err(ExtensionError::Runtime(
                     "null status from register_stage_descriptor".into(),
@@ -1144,7 +1196,9 @@ unsafe extern "C" fn ext_init(
         Ok(())
     });
     match r {
-        None => ExtensionError::Runtime("panic during extension initialize".into()).into_raw_status(),
+        None => {
+            ExtensionError::Runtime("panic during extension initialize".into()).into_raw_status()
+        }
         Some(Err(e)) => e.into_raw_status(),
         Some(Ok(())) => status::status_ok(),
     }
@@ -1155,6 +1209,10 @@ static EXTENSION_VTABLE: MongoExtensionVTable = MongoExtensionVTable {
 };
 
 /// Called from `export_source_stage!` with a static [`SourceOps`] table for the concrete stage.
+///
+/// # Safety
+/// Host services and the output pointer must satisfy the requirements of
+/// [`get_multi_source_extension_impl`]. The stage hooks must honor their state contracts.
 pub unsafe fn get_source_extension_impl(
     ops: &'static SourceOps,
     version: crate::sys::MongoExtensionAPIVersion,
@@ -1165,6 +1223,11 @@ pub unsafe fn get_source_extension_impl(
 }
 
 /// Called from multi-source export helpers with static [`SourceOps`] tables for every concrete stage.
+///
+/// # Safety
+/// Non-null host services must satisfy the MongoDB lifetime/callback contract;
+/// non-null `extension_out` must be aligned and writable for one pointer.
+/// Stage hooks must honor their allocation, state, and callback contracts.
 pub unsafe fn get_multi_source_extension_impl(
     ops: &[&'static SourceOps],
     version: crate::sys::MongoExtensionAPIVersion,
@@ -1183,7 +1246,10 @@ pub unsafe fn get_multi_source_extension_impl(
         }
         for rhs in &ops[idx + 1..] {
             if lhs.name == rhs.name {
-                return status::new_error_status(-1, format!("duplicate source stage name {}", lhs.name));
+                return status::new_error_status(
+                    -1,
+                    format!("duplicate source stage name {}", lhs.name),
+                );
             }
         }
     }
@@ -1220,9 +1286,9 @@ pub unsafe fn get_multi_source_extension_impl(
 #[cfg(test)]
 mod catalog_tests {
     use super::*;
+    use crate::sys::{MongoExtensionNamespaceString, MONGO_EXTENSION_STATUS_OK};
     use bson::doc;
     use std::cell::RefCell;
-    use crate::sys::{MongoExtensionNamespaceString, MONGO_EXTENSION_STATUS_OK};
 
     thread_local! {
         static OBSERVED: RefCell<Vec<Option<CatalogContext>>> = const { RefCell::new(Vec::new()) };
@@ -1245,7 +1311,10 @@ mod catalog_tests {
         }
         let document = doc! { "sequence": *count };
         *count += 1;
-        Ok(Next::Advanced { document, metadata: None })
+        Ok(Next::Advanced {
+            document,
+            metadata: None,
+        })
     }
 
     unsafe fn drop_state(state: *mut c_void) {
@@ -1261,10 +1330,14 @@ mod catalog_tests {
     }
 
     static OPS: SourceOps = SourceOps {
-        name: "$catalogProbe", expect_empty: false,
-        open_from_doc: open, next, drop_state,
+        name: "$catalogProbe",
+        expect_empty: false,
+        open_from_doc: open,
+        next,
+        drop_state,
         on_extension_initialized: None,
-        static_properties_doc: properties, expand_inner: expand,
+        static_properties_doc: properties,
+        expand_inner: expand,
         merging_pipeline: None,
     };
 
@@ -1274,18 +1347,31 @@ mod catalog_tests {
         properties
     }
 
-    static GENERATOR_OPS: SourceOps = SourceOps { static_properties_doc: generator_properties, ..OPS };
+    static GENERATOR_OPS: SourceOps = SourceOps {
+        static_properties_doc: generator_properties,
+        ..OPS
+    };
 
     fn view(bytes: &[u8]) -> MongoExtensionByteView {
-        MongoExtensionByteView { data: bytes.as_ptr(), len: bytes.len() as u64 }
+        MongoExtensionByteView {
+            data: bytes.as_ptr(),
+            len: bytes.len() as u64,
+        }
     }
 
-    fn raw_catalog(db: &[u8], collection: &[u8], uuid: &[u8], router: u8) -> MongoExtensionCatalogContext {
+    fn raw_catalog(
+        db: &[u8],
+        collection: &[u8],
+        uuid: &[u8],
+        router: u8,
+    ) -> MongoExtensionCatalogContext {
         MongoExtensionCatalogContext {
             namespace_string: MongoExtensionNamespaceString {
-                database_name: view(db), collection_name: view(collection),
+                database_name: view(db),
+                collection_name: view(collection),
             },
-            uuid_string: view(uuid), in_router: router,
+            uuid_string: view(uuid),
+            in_router: router,
             verbosity: MongoExtensionExplainVerbosity::kQueryPlanner,
         }
     }
@@ -1318,38 +1404,65 @@ mod catalog_tests {
         let mut documents = Vec::new();
         for _ in 0..4 {
             let mut result = std::mem::MaybeUninit::<MongoExtensionGetNextResult>::uninit();
-            assert_ok(exec_get_next(exec, std::ptr::null_mut(), result.as_mut_ptr()));
+            assert_ok(exec_get_next(
+                exec,
+                std::ptr::null_mut(),
+                result.as_mut_ptr(),
+            ));
             let result = result.assume_init();
             if result.code == MongoExtensionGetNextResultCode::kAdvanced {
-                assert_eq!(result.result_document.type_ as u32, MongoExtensionByteContainerType::kByteBuf as u32);
+                assert_eq!(
+                    result.result_document.type_ as u32,
+                    MongoExtensionByteContainerType::kByteBuf as u32
+                );
                 let buffer = result.result_document.bytes.buf;
                 let view = ((*(*buffer).vtable).get_view)(buffer);
-                documents.push(Document::from_reader(std::slice::from_raw_parts(view.data, view.len as usize)).unwrap());
+                documents.push(
+                    Document::from_reader(std::slice::from_raw_parts(view.data, view.len as usize))
+                        .unwrap(),
+                );
                 ((*(*buffer).vtable).destroy)(buffer);
             } else {
                 assert!(result.code == MongoExtensionGetNextResultCode::kEOF);
             }
         }
         exec_destroy(exec);
-        assert_eq!(documents, vec![doc! {"sequence": 0i32}, doc! {"sequence": 1i32}]);
+        assert_eq!(
+            documents,
+            vec![doc! {"sequence": 0i32}, doc! {"sequence": 1i32}]
+        );
         OBSERVED.with(|observed| observed.borrow().clone())
     }
 
     #[test]
     fn explicit_generator_ignores_nonempty_upstream_on_router_and_replica_set() {
         for in_router in [false, true] {
-            let catalog = CatalogContext { database_name: "shop".into(), collection_name: "products".into(),
-                uuid: None, in_router, verbosity: 0 };
+            let catalog = CatalogContext {
+                database_name: "shop".into(),
+                collection_name: "products".into(),
+                uuid: None,
+                in_router,
+                verbosity: 0,
+            };
             let observed = unsafe {
                 let args = bson::to_vec(&doc! {}).unwrap();
                 let upstream = Box::into_raw(Box::new(exec_alloc(args.clone(), None, &OPS))).cast();
-                let exec = Box::into_raw(Box::new(exec_alloc(args, Some(catalog.clone()), &GENERATOR_OPS))).cast();
+                let exec = Box::into_raw(Box::new(exec_alloc(
+                    args,
+                    Some(catalog.clone()),
+                    &GENERATOR_OPS,
+                )))
+                .cast();
                 assert_ok(exec_set_source(exec, upstream));
                 let observed = run(exec);
                 exec_destroy(upstream);
                 observed
             };
-            assert_eq!(observed, vec![Some(catalog); 4], "generator must not open or read upstream");
+            assert_eq!(
+                observed,
+                vec![Some(catalog); 4],
+                "generator must not open or read upstream"
+            );
         }
     }
 
@@ -1358,30 +1471,57 @@ mod catalog_tests {
         let observed = unsafe {
             let args = bson::to_vec(&doc! {}).unwrap();
             let upstream = Box::into_raw(Box::new(exec_alloc(args.clone(), None, &OPS))).cast();
-            let catalog = CatalogContext { database_name: "shop".into(), collection_name: "products".into(),
-                uuid: None, in_router: false, verbosity: 0 };
+            let catalog = CatalogContext {
+                database_name: "shop".into(),
+                collection_name: "products".into(),
+                uuid: None,
+                in_router: false,
+                verbosity: 0,
+            };
             let exec = Box::into_raw(Box::new(exec_alloc(args, Some(catalog), &OPS))).cast();
             assert_ok(exec_set_source(exec, upstream));
             let observed = run(exec);
             exec_destroy(upstream);
             observed
         };
-        assert_eq!(observed, vec![None; 4], "legacy source must forward the upstream sequence");
+        assert_eq!(
+            observed,
+            vec![None; 4],
+            "legacy source must forward the upstream sequence"
+        );
     }
 
     unsafe fn upstream_error(_: *mut c_void, _: &mut StageContext) -> crate::error::Result<Next> {
         Err(ExtensionError::Runtime("upstream must not be read".into()))
     }
-    static ERROR_UPSTREAM_OPS: SourceOps = SourceOps { next: upstream_error, ..OPS };
+    static ERROR_UPSTREAM_OPS: SourceOps = SourceOps {
+        next: upstream_error,
+        ..OPS
+    };
 
     #[test]
     fn explicit_generator_does_not_read_upstream_errors() {
-        let catalog = CatalogContext { database_name: "shop".into(), collection_name: "products".into(),
-            uuid: None, in_router: true, verbosity: 0 };
+        let catalog = CatalogContext {
+            database_name: "shop".into(),
+            collection_name: "products".into(),
+            uuid: None,
+            in_router: true,
+            verbosity: 0,
+        };
         let observed = unsafe {
             let args = bson::to_vec(&doc! {}).unwrap();
-            let upstream = Box::into_raw(Box::new(exec_alloc(args.clone(), None, &ERROR_UPSTREAM_OPS))).cast();
-            let exec = Box::into_raw(Box::new(exec_alloc(args, Some(catalog.clone()), &GENERATOR_OPS))).cast();
+            let upstream = Box::into_raw(Box::new(exec_alloc(
+                args.clone(),
+                None,
+                &ERROR_UPSTREAM_OPS,
+            )))
+            .cast();
+            let exec = Box::into_raw(Box::new(exec_alloc(
+                args,
+                Some(catalog.clone()),
+                &GENERATOR_OPS,
+            )))
+            .cast();
             assert_ok(exec_set_source(exec, upstream));
             let observed = run(exec);
             exec_destroy(upstream);
@@ -1394,16 +1534,30 @@ mod catalog_tests {
         observe(ctx);
         Ok(Next::Eof)
     }
-    static EMPTY_UPSTREAM_OPS: SourceOps = SourceOps { next: upstream_eof, ..OPS };
+    static EMPTY_UPSTREAM_OPS: SourceOps = SourceOps {
+        next: upstream_eof,
+        ..OPS
+    };
 
     #[test]
     fn input_requiring_source_keeps_generator_fallback_after_empty_upstream() {
-        let catalog = CatalogContext { database_name: "shop".into(), collection_name: "products".into(),
-            uuid: None, in_router: false, verbosity: 0 };
+        let catalog = CatalogContext {
+            database_name: "shop".into(),
+            collection_name: "products".into(),
+            uuid: None,
+            in_router: false,
+            verbosity: 0,
+        };
         let observed = unsafe {
             let args = bson::to_vec(&doc! {}).unwrap();
-            let upstream = Box::into_raw(Box::new(exec_alloc(args.clone(), None, &EMPTY_UPSTREAM_OPS))).cast();
-            let exec = Box::into_raw(Box::new(exec_alloc(args, Some(catalog.clone()), &OPS))).cast();
+            let upstream = Box::into_raw(Box::new(exec_alloc(
+                args.clone(),
+                None,
+                &EMPTY_UPSTREAM_OPS,
+            )))
+            .cast();
+            let exec =
+                Box::into_raw(Box::new(exec_alloc(args, Some(catalog.clone()), &OPS))).cast();
             assert_ok(exec_set_source(exec, upstream));
             let observed = run(exec);
             exec_destroy(upstream);
@@ -1414,15 +1568,29 @@ mod catalog_tests {
         assert_eq!(observed, expected);
     }
 
-    fn panic_properties() -> Document { panic!("properties test panic"); }
-    static PANIC_PROPERTIES_OPS: SourceOps = SourceOps { static_properties_doc: panic_properties, ..OPS };
+    fn panic_properties() -> Document {
+        panic!("properties test panic");
+    }
+    static PANIC_PROPERTIES_OPS: SourceOps = SourceOps {
+        static_properties_doc: panic_properties,
+        ..OPS
+    };
 
     #[test]
     fn generator_property_panic_does_not_cross_execution_ffi() {
         unsafe {
-            let exec = Box::into_raw(Box::new(exec_alloc(bson::to_vec(&doc! {}).unwrap(), None, &PANIC_PROPERTIES_OPS))).cast();
+            let exec = Box::into_raw(Box::new(exec_alloc(
+                bson::to_vec(&doc! {}).unwrap(),
+                None,
+                &PANIC_PROPERTIES_OPS,
+            )))
+            .cast();
             let mut result = std::mem::MaybeUninit::<MongoExtensionGetNextResult>::uninit();
-            assert_error(exec_get_next(exec, std::ptr::null_mut(), result.as_mut_ptr()));
+            assert_error(exec_get_next(
+                exec,
+                std::ptr::null_mut(),
+                result.as_mut_ptr(),
+            ));
             exec_destroy(exec);
         }
     }
@@ -1435,7 +1603,11 @@ mod catalog_tests {
         assert_eq!(expected.namespace(), "catalog.articles");
         assert_eq!(expected.uuid, None);
         let observed = unsafe { run(compile(&raw)) };
-        assert_eq!(observed, vec![Some(expected); 4], "open, both rows and EOF must see router catalog");
+        assert_eq!(
+            observed,
+            vec![Some(expected); 4],
+            "open, both rows and EOF must see router catalog"
+        );
     }
 
     #[test]
@@ -1445,7 +1617,10 @@ mod catalog_tests {
             let collection = b"products".to_vec();
             let uuid = b"11111111-1111-1111-1111-111111111111".to_vec();
             let raw = raw_catalog(&db, &collection, &uuid, 0);
-            (unsafe { compile(&raw) }, unsafe { catalog_context_from_raw(&raw) }.unwrap())
+            (
+                unsafe { compile(&raw) },
+                unsafe { catalog_context_from_raw(&raw) }.unwrap(),
+            )
         };
         assert!(!expected.in_router);
         assert_eq!(unsafe { run(exec) }, vec![Some(expected); 4]);
@@ -1458,28 +1633,50 @@ mod catalog_tests {
 
     #[test]
     fn incomplete_catalog_namespace_is_not_exposed() {
-        for raw in [raw_catalog(b"", b"articles", b"", 1), raw_catalog(b"catalog", b"", b"", 1)] {
+        for raw in [
+            raw_catalog(b"", b"articles", b"", 1),
+            raw_catalog(b"catalog", b"", b"", 1),
+        ] {
             assert_eq!(unsafe { catalog_context_from_raw(&raw) }, None);
         }
         assert_eq!(unsafe { catalog_context_from_raw(std::ptr::null()) }, None);
     }
 
-    fn merger(_: Document, catalog: Option<&CatalogContext>) -> crate::error::Result<Option<Vec<Document>>> {
+    fn merger(
+        _: Document,
+        catalog: Option<&CatalogContext>,
+    ) -> crate::error::Result<Option<Vec<Document>>> {
         Ok(catalog.filter(|c| c.in_router).map(|_| Vec::new()))
     }
 
-    static ROUTER_OPS: SourceOps = SourceOps { merging_pipeline: Some(merger), ..OPS };
+    static ROUTER_OPS: SourceOps = SourceOps {
+        merging_pipeline: Some(merger),
+        ..OPS
+    };
 
     #[test]
     fn bound_router_returns_merger_plan_with_owned_source_clone() {
         unsafe {
-            let catalog = CatalogContext { database_name: "shop".into(), collection_name: "products".into(),
-                uuid: None, in_router: true, verbosity: 0 };
+            let catalog = CatalogContext {
+                database_name: "shop".into(),
+                collection_name: "products".into(),
+                uuid: None,
+                in_router: true,
+                verbosity: 0,
+            };
             let args = bson::to_vec(&doc! {}).unwrap();
-            let logical = Box::into_raw(Box::new(logical_alloc(args, Some(catalog.clone()), &ROUTER_OPS))).cast();
+            let logical = Box::into_raw(Box::new(logical_alloc(
+                args,
+                Some(catalog.clone()),
+                &ROUTER_OPS,
+            )))
+            .cast();
             let mut plan = std::ptr::null_mut();
             assert_ok(log_dpl(logical, &mut plan));
-            assert!(!plan.is_null(), "router merger hook must produce a DPL object");
+            assert!(
+                !plan.is_null(),
+                "router merger hook must produce a DPL object"
+            );
             log_destroy(logical);
             let vt = &*(*plan).vtable;
             let mut shards = std::ptr::null_mut();
@@ -1491,7 +1688,10 @@ mod catalog_tests {
             let cvt = &*(*merging).vtable;
             assert_eq!((cvt.size)(merging), 1);
             let mut elements = Vec::<crate::sys::MongoExtensionDPLArrayElement>::with_capacity(1);
-            let mut array = crate::sys::MongoExtensionDPLArray { size: 1, elements: elements.as_mut_ptr() };
+            let mut array = crate::sys::MongoExtensionDPLArray {
+                size: 1,
+                elements: elements.as_mut_ptr(),
+            };
             assert_ok((cvt.transfer)(merging, &mut array));
             elements.set_len(1);
             (cvt.destroy)(merging);
@@ -1499,7 +1699,10 @@ mod catalog_tests {
             assert_eq!((*cloned.cast::<LogicalObj>()).catalog, Some(catalog));
             let mut nested_plan = std::ptr::null_mut();
             assert_ok(log_dpl(cloned, &mut nested_plan));
-            assert!(nested_plan.is_null(), "merger clone must not expand recursively");
+            assert!(
+                nested_plan.is_null(),
+                "merger clone must not expand recursively"
+            );
             log_destroy(cloned);
         }
     }
@@ -1507,7 +1710,12 @@ mod catalog_tests {
     #[test]
     fn default_source_has_no_distributed_plan() {
         unsafe {
-            let logical = Box::into_raw(Box::new(logical_alloc(bson::to_vec(&doc! {}).unwrap(), None, &OPS))).cast();
+            let logical = Box::into_raw(Box::new(logical_alloc(
+                bson::to_vec(&doc! {}).unwrap(),
+                None,
+                &OPS,
+            )))
+            .cast();
             let mut plan = std::ptr::null_mut();
             assert_ok(log_dpl(logical, &mut plan));
             assert!(plan.is_null());
@@ -1516,9 +1724,19 @@ mod catalog_tests {
     }
 
     unsafe fn make_merger_plan() -> *mut MongoExtensionDistributedPlanLogic {
-        let catalog = CatalogContext { database_name: "shop".into(), collection_name: "products".into(),
-            uuid: None, in_router: true, verbosity: 0 };
-        let logical = Box::into_raw(Box::new(logical_alloc(bson::to_vec(&doc! {}).unwrap(), Some(catalog), &ROUTER_OPS))).cast();
+        let catalog = CatalogContext {
+            database_name: "shop".into(),
+            collection_name: "products".into(),
+            uuid: None,
+            in_router: true,
+            verbosity: 0,
+        };
+        let logical = Box::into_raw(Box::new(logical_alloc(
+            bson::to_vec(&doc! {}).unwrap(),
+            Some(catalog),
+            &ROUTER_OPS,
+        )))
+        .cast();
         let mut plan = std::ptr::null_mut();
         assert_ok(log_dpl(logical, &mut plan));
         log_destroy(logical);
@@ -1559,11 +1777,17 @@ mod catalog_tests {
         unsafe {
             let plan = make_merger_plan();
             let mut merging = std::ptr::null_mut();
-            assert_ok(((*(*plan).vtable).extract_merging_pipeline)(plan, &mut merging));
+            assert_ok(((*(*plan).vtable).extract_merging_pipeline)(
+                plan,
+                &mut merging,
+            ));
             ((*(*plan).vtable).destroy)(plan);
             let vt = &*(*merging).vtable;
             assert_error((vt.transfer)(merging, std::ptr::null_mut()));
-            let mut array = crate::sys::MongoExtensionDPLArray { size: 0, elements: std::ptr::null_mut() };
+            let mut array = crate::sys::MongoExtensionDPLArray {
+                size: 0,
+                elements: std::ptr::null_mut(),
+            };
             assert_error((vt.transfer)(merging, &mut array));
             array.size = 1;
             assert_error((vt.transfer)(merging, &mut array));
@@ -1587,15 +1811,26 @@ mod catalog_tests {
         }
     }
 
-    fn panic_merger(_: Document, _: Option<&CatalogContext>) -> crate::error::Result<Option<Vec<Document>>> {
+    fn panic_merger(
+        _: Document,
+        _: Option<&CatalogContext>,
+    ) -> crate::error::Result<Option<Vec<Document>>> {
         panic!("DPL test panic");
     }
-    static PANIC_OPS: SourceOps = SourceOps { merging_pipeline: Some(panic_merger), ..OPS };
+    static PANIC_OPS: SourceOps = SourceOps {
+        merging_pipeline: Some(panic_merger),
+        ..OPS
+    };
 
     #[test]
     fn dpl_hook_panic_is_contained_at_ffi_boundary() {
         unsafe {
-            let logical = Box::into_raw(Box::new(logical_alloc(bson::to_vec(&doc! {}).unwrap(), None, &PANIC_OPS))).cast();
+            let logical = Box::into_raw(Box::new(logical_alloc(
+                bson::to_vec(&doc! {}).unwrap(),
+                None,
+                &PANIC_OPS,
+            )))
+            .cast();
             let mut plan = std::ptr::null_mut();
             assert_error(log_dpl(logical, &mut plan));
             assert!(plan.is_null());
@@ -1616,10 +1851,23 @@ mod catalog_tests {
 
     #[test]
     fn dpl_hook_can_decline_missing_and_shard_catalogs() {
-        for catalog in [None, Some(CatalogContext { database_name: "shop".into(), collection_name: "products".into(),
-            uuid: None, in_router: false, verbosity: 0 })] {
+        for catalog in [
+            None,
+            Some(CatalogContext {
+                database_name: "shop".into(),
+                collection_name: "products".into(),
+                uuid: None,
+                in_router: false,
+                verbosity: 0,
+            }),
+        ] {
             unsafe {
-                let logical = Box::into_raw(Box::new(logical_alloc(bson::to_vec(&doc! {}).unwrap(), catalog, &ROUTER_OPS))).cast();
+                let logical = Box::into_raw(Box::new(logical_alloc(
+                    bson::to_vec(&doc! {}).unwrap(),
+                    catalog,
+                    &ROUTER_OPS,
+                )))
+                .cast();
                 let mut plan = std::ptr::null_mut();
                 assert_ok(log_dpl(logical, &mut plan));
                 assert!(plan.is_null());

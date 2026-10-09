@@ -9,7 +9,8 @@ cd "$ROOT"
 IMAGE="${RUST_TEST_IMAGE:-rust:bookworm}"
 
 echo "==> Running workspace Rust tests in ${IMAGE} (mounted ${ROOT})..."
-docker run --rm \
+docker run --rm --cpus 2 \
+  -e CARGO_BUILD_JOBS=2 \
   -v "${ROOT}:/build" \
   -w /build \
   "${IMAGE}" \
