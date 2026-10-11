@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -6,6 +9,61 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_sink_uses_the_connector_4_class_name(self):
+        sink = json.loads((ROOT / "config/opensearch-sink.json").read_text())
+        self.assertEqual(sink["connector.class"],
+                         "io.aiven.kafka.connect.opensearch.OpenSearchSinkConnector")
+
+    def test_connect_uses_its_own_upgraded_image(self):
+        services = json.loads((ROOT / "docker-compose.yml").read_text())["services"]
+        self.assertEqual(services["connect"]["build"]["dockerfile"],
+                         "examples/opensearch-mongos/Dockerfile.connect")
+        dockerfile = (ROOT / "Dockerfile.connect").read_text()
+        self.assertIn("FROM confluentinc/cp-kafka-connect-base:8.0.8", dockerfile)
+        self.assertIn("ARG OPENSEARCH_CONNECTOR_VERSION=4.1.0", dockerfile)
+
+    def test_products_source_and_local_dataset_mount(self):
+        source = json.loads((ROOT / "config/mongo-products-source.json").read_text())
+        self.assertEqual(source["connection.uri"], "mongodb://mongos:27017")
+        self.assertEqual(source["collection"], "products")
+        self.assertEqual(source["startup.mode"], "copy_existing")
+        self.assertEqual(json.loads(source["pipeline"]), [
+            {"$set": {"documentKey": {"_id": "$documentKey._id"}}}
+        ])
+        self.assertEqual(source["change.stream.document.key.as.key"], "true")
+        self.assertEqual(source["publish.full.document.only.tombstone.on.delete"], "true")
+        sink = json.loads((ROOT / "config/opensearch-sink.json").read_text())
+        self.assertIn("mongodb.search_demo.products", sink["topics"].split(","))
+        services = json.loads((ROOT / "docker-compose.yml").read_text())["services"]
+        for service in ("mongos", "tests"):
+            self.assertIn("./datasets:/datasets:ro", services[service]["volumes"])
+        self.assertIn("products", (ROOT / "scripts/register-connectors.sh").read_text())
+
+    def test_dashboards_is_started_with_the_demo(self):
+        services = json.loads((ROOT / "docker-compose.yml").read_text())["services"]
+        dashboards = services["opensearch-dashboards"]
+        self.assertEqual(dashboards["image"], "opensearchproject/opensearch-dashboards:2.19.6")
+        self.assertEqual(services["opensearch"]["image"],
+                         "${OPENSEARCH_IMAGE:-opensearchproject/opensearch:2.19.6}")
+        self.assertNotIn("http.compression", services["opensearch"]["environment"])
+        self.assertEqual(dashboards["ports"], ["5602:5601"])
+        self.assertNotIn("profiles", dashboards)
+        self.assertIn("opensearch-dashboards", (ROOT / "run-demo.sh").read_text())
+
+    def test_help_variants_do_not_invoke_docker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            docker = Path(directory) / "docker"
+            docker.write_text("#!/bin/sh\nexit 77\n")
+            docker.chmod(0o755)
+            for argument in ("help", "--help", "-h"):
+                with self.subTest(argument=argument):
+                    result = subprocess.run(["bash", str(ROOT / "run-demo.sh"), argument],
+                                            env=dict(os.environ, PATH=directory + ":" + os.environ["PATH"]),
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    for word in ("build", "up", "test", "query", "dashboards", "down", "5602", "27040"):
+                        self.assertIn(word, result.stdout)
+
     def test_unsharded_source_keeps_only_typed_id_and_sink_subscribes(self):
         source = json.loads((ROOT / "config" / "mongo-unsharded-source.json").read_text())
         self.assertEqual(source["connection.uri"], "mongodb://mongos:27017")

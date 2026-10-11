@@ -146,7 +146,7 @@ services:
     restart: "no"
 
   opensearch:
-    image: ${OPENSEARCH_IMAGE:-opensearchproject/opensearch:2.19.0}
+    image: ${OPENSEARCH_IMAGE:-opensearchproject/opensearch:2.19.6}
     environment:
       discovery.type: single-node
       plugins.security.disabled: "true"
@@ -184,7 +184,7 @@ services:
     restart: "no"
 
   opensearch-dashboards:
-    image: ${OPENSEARCH_DASHBOARDS_IMAGE:-opensearchproject/opensearch-dashboards:2.19.0}
+    image: ${OPENSEARCH_DASHBOARDS_IMAGE:-opensearchproject/opensearch-dashboards:2.19.6}
     profiles: ["dashboards"]
     depends_on:
       opensearch:
@@ -236,7 +236,7 @@ services:
     volumes:
       - .:/demo:ro
     working_dir: /demo/tests
-    command: ["python", "-m", "unittest", "-v", "test_pipeline"]
+    command: ["python", "-m", "unittest", "-v", "test_http", "test_pipeline"]
     profiles: ["test"]
 
 volumes:

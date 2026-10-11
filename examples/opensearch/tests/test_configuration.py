@@ -7,8 +7,28 @@ CONFIG = Path(__file__).resolve().parents[1] / "config"
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_opensearch_and_dashboards_pin_the_fixed_patch_release(self):
+        compose = (CONFIG.parent / "docker-compose.yml").read_text()
+        self.assertIn("${OPENSEARCH_IMAGE:-opensearchproject/opensearch:2.19.6}", compose)
+        self.assertIn("${OPENSEARCH_DASHBOARDS_IMAGE:-opensearchproject/opensearch-dashboards:2.19.6}",
+                      compose)
+        self.assertNotIn("http.compression", compose)
+
+    def test_connect_uses_java_21_image_and_sigv4_connector_release(self):
+        dockerfile = (CONFIG.parent / "Dockerfile.connect").read_text()
+        self.assertIn("FROM confluentinc/cp-kafka-connect-base:8.0.8", dockerfile)
+        self.assertIn("ARG OPENSEARCH_CONNECTOR_VERSION=4.1.0", dockerfile)
+        self.assertNotIn("OPENSEARCH_CONNECTOR_VERSION=3.", dockerfile)
+
     def load(self, filename):
         return json.loads((CONFIG / filename).read_text())
+
+    def test_sinks_use_the_connector_4_class_name(self):
+        for filename in ("opensearch-sink-connector.json",
+                         "opensearch-articles-sink-connector.json"):
+            with self.subTest(filename=filename):
+                self.assertEqual(self.load(filename)["connector.class"],
+                                 "io.aiven.kafka.connect.opensearch.OpenSearchSinkConnector")
 
     def test_template_is_scoped_to_mongodb_and_maps_arbitrary_embeddings(self):
         template = self.load("opensearch-index-template.json")

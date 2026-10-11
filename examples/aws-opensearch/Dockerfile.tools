@@ -1,0 +1,12 @@
+FROM python:3.11-slim
+RUN pip install --no-cache-dir boto3==1.40.0
+RUN pip install --no-cache-dir pymongo==4.10.1 requests==2.32.3
+ENV PYTHONPATH=/demo/scripts
+WORKDIR /demo
+COPY examples/aws-opensearch/scripts /demo/scripts
+COPY examples/aws-opensearch/config /demo/config
+COPY examples/aws-opensearch/tests /demo/tests
+COPY examples/aws-opensearch/embeddings /demo/embeddings
+COPY examples/aws-opensearch/docker-compose.yml examples/aws-opensearch/run-demo.sh /demo/
+COPY examples/aws-opensearch/datasets /datasets
+CMD ["python", "/demo/scripts/setup_local.py"]

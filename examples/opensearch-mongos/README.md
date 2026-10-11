@@ -2,13 +2,16 @@
 
 Separate sharded-cluster example for the **Rust SDK for MongoDB Extensions**.
 The extension is loaded **only on mongos**. The replica-set example in
-[../opensearch](../opensearch/README.md) remains unchanged.
+All configuration, scripts, datasets and Dockerfiles belong to this example.
+Only the SDK and [OpenSearch core](../../opensearch-extension-core/README.md) are shared.
 
 ## Build and start
 
 Run from the repository root. Only Docker is required; nothing is installed on
 the host. This demo uses one mongos, one single-node CSRS, two single-node shards,
 one Kafka broker/Connect worker, and one OpenSearch node. It is not an HA deployment.
+OpenSearch and Dashboards use 2.19.6; this example's Kafka Connect image uses
+8.0.8 / Java 21 with Aiven OpenSearch Sink 4.1.0. The broker remains on 7.8.0.
 Each mongod (CSRS and both shards) uses `--wiredTigerCacheSizeGB 0.25` to bound
 its internal WiredTiger cache to 256 MiB. This is not a total process-memory cap.
 JVM heap settings are unchanged. Run this and the replica-set example separately,
@@ -17,12 +20,19 @@ stopping one stack before starting the other.
 ```bash
 bash examples/opensearch-mongos/run-demo.sh build
 bash examples/opensearch-mongos/run-demo.sh up
+bash examples/opensearch-mongos/run-demo.sh --help
 ```
 
 Startup initializes the cluster, inserts the demo documents **before** registering
 the source connectors, deploys the embedding model, and installs the pipelines
 and index template. Initial copy indexes the pre-existing documents; change
 streams handle subsequent writes. Wait a few seconds for indexing to finish.
+OpenSearch Dashboards starts automatically at <http://localhost:5602>; allow
+a little time for its web server to initialize. To restart it independently:
+
+```bash
+bash examples/opensearch-mongos/run-demo.sh dashboards
+```
 
 ## Insert and inspect
 
@@ -33,6 +43,14 @@ IDs, and is never passed to `shardCollection`. `title` is
 MongoDB-only; `description` is vectorized. Routing fields are `tenant` and, for
 the compound key, `location.region`. ObjectId and Int64 identifiers are included.
 
+`search_demo.products` is an additional collection sharded by
+`{_id: "hashed"}`, with two initial chunks distributed across the two shards.
+It contains the same 20 outdoor products as the replica-set demo: the existing
+[`outdoor-products.json`](datasets/outdoor-products.json) is mounted
+read-only at `/datasets`, not copied. Documents contain only `_id`, `title`
+and `description`. Its document key contains `_id` once, without a separate
+shard-key field or a hashed value.
+
 Reinsert/upsert the dataset:
 
 ```bash
@@ -42,10 +60,18 @@ curl -fsS -X POST 'http://localhost:9201/mongodb.search_demo.range/_refresh'
 curl -fsS 'http://localhost:9201/mongodb.search_demo.range/_search?pretty&size=10'
 ```
 
+Inspect the local dataset and its OpenSearch index:
+
+```bash
+docker compose -f examples/opensearch-mongos/docker-compose.yml --project-name opensearch-mongos exec -T mongos mongosh --quiet --eval 'db.getSiblingDB("search_demo").products.find().forEach(printjson)'
+curl -fsS -X POST 'http://localhost:9201/mongodb.search_demo.products/_refresh'
+curl -fsS 'http://localhost:9201/mongodb.search_demo.products/_search?pretty&size=20'
+```
+
 OpenSearch `_source` contains `description_embedding` (384 numbers) instead of
 `description`, plus unindexed `__mongodb.documentKey` metadata. `title` is absent.
 OpenSearch `_id` is the complete typed MongoDB document key serialized as
-canonical Extended JSON, not the original `_id` alone.
+canonical Extended JSON, not a bare MongoDB `_id` value.
 `__mongodb.documentKey` is an exact string copy of that `_id`, created **after**
 embedding. Parsing it as Extended JSON restores BSON types and literal dotted
 shard-key names. Metadata is neither indexed nor embedded; Kafka sends only
@@ -76,7 +102,8 @@ docker compose -f examples/opensearch-mongos/docker-compose.yml --project-name o
 docker compose -f examples/opensearch-mongos/docker-compose.yml --project-name opensearch-mongos exec -T mongos mongosh --quiet /scripts/demo-queries.js
 ```
 
-The script runs this pipeline for all three shard-key types:
+The script runs this pipeline for all demo collections, including the four
+shard-key variants and the unsharded collection:
 
 ```javascript
 db.getSiblingDB("search_demo").range.aggregate([
@@ -87,6 +114,14 @@ db.getSiblingDB("search_demo").range.aggregate([
 
 Results are current full MongoDB documents, ordered by score. No model ID or
 collection name is passed to the stage. `$search` is not registered.
+The script also queries the `products` collection with the `_id: hashed` shard
+key. To query it directly:
+
+```bash
+docker compose -f examples/opensearch-mongos/docker-compose.yml --project-name opensearch-mongos exec -T mongos mongosh --quiet --eval 'printjson(db.getSiblingDB("search_demo").products.aggregate([{$vectorSearch:{path:"description",query:"waterproof hiking jacket",limit:5}},{$set:{score:{$meta:"vectorSearchScore"}}}]).toArray())'
+curl -fsS -X POST 'http://localhost:9201/mongodb.search_demo.products/_search?allow_partial_search_results=false&filter_path=hits.hits._id,hits.hits._score' -H 'Content-Type: application/json' -d '{"size":5,"_source":false,"query":{"neural":{"description_embedding":{"query_text":"waterproof hiking jacket","k":5}}}}'
+```
+
 The same script also queries `unsharded`; its OpenSearch document key contains
 only `_id`, with no shard-key fields. Synchronization and lookup still go through
 mongos. To inspect its vectors:
@@ -111,15 +146,23 @@ tests cover initial copy, typed `_id`-only keys, insert/update/replace/delete,
 full documents, scores, and fresh Mongo-only titles through mongos. The Rust suite
 checks key decoding, argument validation, generator order/EOF, metadata, partial
 responses, and endpoint failover.
+The products tests verify the exact local dataset, documents on both shards,
+initial-copy embeddings, stable `_id`-only keys for insert/update/replace/delete,
+and matching OpenSearch/mongos rankings and scores. The suite also checks
+Dashboards readiness.
 
-Optional OpenSearch Dashboards (not Kibana):
+OpenSearch Dashboards (not Kibana) starts with `up`. Reopen/start it separately:
 
 ```bash
-docker compose -f examples/opensearch-mongos/docker-compose.yml --project-name opensearch-mongos --profile dashboards up -d opensearch-dashboards
+bash examples/opensearch-mongos/run-demo.sh dashboards
 ```
 
 Open <http://localhost:5602>. MongoDB is available at `mongodb://localhost:27040`,
 OpenSearch at <http://localhost:9201>, and Kafka Connect at <http://localhost:8084>.
+In Dashboards, create an index pattern `mongodb.search_demo.products` without
+a time field, then open Discover to inspect embeddings and `__mongodb.documentKey`.
+`down` removes containers, networks and volumes, including the deployed model
+state; the next `up` creates a fresh demo.
 
 ## Scope and limits
 

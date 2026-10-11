@@ -40,8 +40,16 @@ flowchart TB
 
 ## Startup and Automatic Mappings
 
+OpenSearch and OpenSearch Dashboards are pinned to **2.19.6**. This patch line
+includes the [HTTP compression fix](https://github.com/opensearch-project/OpenSearch/pull/17408)
+for clients advertising Zstd; HTTP compression remains enabled. The regression
+tests check complete responses for both Zstd-only and mixed gzip/Zstd requests.
+
 During image build, [Dockerfile.connect](Dockerfile.connect) installs the MongoDB
-source connector and pinned Aiven OpenSearch sink version **3.2.0**.
+source connector and pinned Aiven OpenSearch sink version **4.1.0**.
+This example's Connect image uses Confluent Platform **8.0.8** with **Java 21**;
+the Kafka broker remains on **7.8.0**. Connector 4.x supports AWS SigV4,
+but these local examples still use unsigned HTTP requests.
 [docker-compose.yml](docker-compose.yml) initializes the MongoDB replica set,
 loads the dataset, and creates `mongodb.search_demo.products` with one partition.
 

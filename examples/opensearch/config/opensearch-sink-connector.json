@@ -1,5 +1,5 @@
 {
-  "connector.class": "io.aiven.kafka.connect.opensearch.OpensearchSinkConnector",
+  "connector.class": "io.aiven.kafka.connect.opensearch.OpenSearchSinkConnector",
   "tasks.max": "1",
   "topics": "mongodb.search_demo.products",
   "connection.url": "http://opensearch:9200",

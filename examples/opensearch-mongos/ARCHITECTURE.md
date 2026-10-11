@@ -56,6 +56,11 @@ Unsharded collections use the same path, with document keys containing only
 `_id`. Native lookup then compares only `_id` and returns documents from the
 owning shard through mongos; no shard-key predicate is invented. The demo and
 integration suite include an unsharded collection alongside the sharded ones.
+The `products` collection shares the replica-set demo dataset and is sharded by
+`{_id: "hashed"}`. Its document keys also contain only `_id`; MongoDB routes by
+the hash internally while the source, OpenSearch and lookup retain the original
+identifier. The integration suite verifies documents on both shards and matches
+mongos query results against OpenSearch rankings and scores.
 
 The generic comparison may scatter across shards. Full-key correctness is
 distinct from targeted routing; the latter is not promised by this PoC.
@@ -71,14 +76,14 @@ neural query; neither embeddings nor model IDs are sent by the MongoDB client.
 
 ## Model and default pipelines
 
-During startup, the shared
-[`register-opensearch-model.py`](../opensearch/scripts/register-opensearch-model.py)
+During startup, this example's
+[`register-opensearch-model.py`](scripts/register-opensearch-model.py)
 registers and deploys
 `huggingface/sentence-transformers/paraphrase-MiniLM-L3-v2`, version `1.0.2`, ONNX,
 with 384-dimensional embeddings. It verifies prediction and writes the deployed
 model ID to the model volume.
 
-The shared [`setup-opensearch.py`](../opensearch/scripts/setup-opensearch.py) reads
+The local [`setup-opensearch.py`](scripts/setup-opensearch.py) reads
 this ID and this project's three configuration files:
 
 - [Ingest pipeline](config/opensearch-ingest-pipeline.json): vectorizes every

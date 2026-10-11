@@ -1,0 +1,221 @@
+{
+  "name": "aws-opensearch",
+  "services": {
+    "floci": {
+      "image": "floci/floci:2.2.0",
+      "ports": [
+        "4566:4566"
+      ],
+      "volumes": [
+        "/var/run/docker.sock:/var/run/docker.sock"
+      ],
+      "environment": {
+        "FLOCI_SERVICES_DOCKER_NETWORK": "aws-opensearch_default",
+        "FLOCI_SERVICES_OPENSEARCH_DEFAULT_IMAGE": "mongodb-aws-opensearch:2.19.6",
+        "FLOCI_SERVICES_OPENSEARCH_MOCK": "false",
+        "FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE": "true"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "/usr/local/bin/healthcheck.sh"
+        ],
+        "interval": "3s",
+        "timeout": "5s",
+        "retries": 40
+      }
+    },
+    "embeddings": {
+      "build": {
+        "context": "../..",
+        "dockerfile": "examples/aws-opensearch/embeddings/Dockerfile"
+      },
+      "volumes": [
+        "model-cache:/model-cache"
+      ],
+      "cpus": 2,
+      "environment": {
+        "HF_HUB_DISABLE_TELEMETRY": "1"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=3)"
+        ],
+        "interval": "5s",
+        "timeout": "5s",
+        "retries": 120,
+        "start_period": "30s"
+      }
+    },
+    "setup": {
+      "build": {
+        "context": "../..",
+        "dockerfile": "examples/aws-opensearch/Dockerfile.tools"
+      },
+      "depends_on": {
+        "floci": {
+          "condition": "service_healthy"
+        },
+        "embeddings": {
+          "condition": "service_healthy"
+        }
+      },
+      "environment": {
+        "AWS_ACCESS_KEY_ID": "test",
+        "AWS_SECRET_ACCESS_KEY": "test",
+        "AWS_DEFAULT_REGION": "us-east-1"
+      },
+      "volumes": [
+        "state:/state"
+      ],
+      "restart": "no"
+    },
+    "tools": {
+      "build": {
+        "context": "../..",
+        "dockerfile": "examples/aws-opensearch/Dockerfile.tools"
+      },
+      "profiles": [
+        "test"
+      ],
+      "environment": {
+        "AWS_ACCESS_KEY_ID": "test",
+        "AWS_SECRET_ACCESS_KEY": "test",
+        "AWS_DEFAULT_REGION": "us-east-1"
+      },
+      "volumes": [
+        "state:/state"
+      ],
+      "command": [
+        "python",
+        "-m",
+        "unittest",
+        "discover",
+        "-v",
+        "-s",
+        "/demo/tests"
+      ]
+    },
+    "configure": {
+      "build": {
+        "context": "../..",
+        "dockerfile": "examples/aws-opensearch/Dockerfile.tools"
+      },
+      "depends_on": {
+        "setup": {
+          "condition": "service_completed_successfully"
+        }
+      },
+      "volumes": [
+        "state:/state"
+      ],
+      "command": [
+        "python",
+        "/demo/scripts/configure.py"
+      ]
+    },
+    "kafka": {
+      "image": "${KAFKA_IMAGE:-confluentinc/cp-kafka:7.8.0}",
+      "hostname": "kafka",
+      "ports": [
+        "29092:29092"
+      ],
+      "environment": {
+        "KAFKA_NODE_ID": 1,
+        "KAFKA_PROCESS_ROLES": "broker,controller",
+        "KAFKA_CONTROLLER_QUORUM_VOTERS": "1@kafka:9093",
+        "KAFKA_LISTENERS": "PLAINTEXT://kafka:9092,PLAINTEXT_HOST://0.0.0.0:29092,CONTROLLER://kafka:9093",
+        "KAFKA_ADVERTISED_LISTENERS": "PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092",
+        "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP": "PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT",
+        "KAFKA_INTER_BROKER_LISTENER_NAME": "PLAINTEXT",
+        "KAFKA_CONTROLLER_LISTENER_NAMES": "CONTROLLER",
+        "KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR": 1,
+        "KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR": 1,
+        "KAFKA_TRANSACTION_STATE_LOG_MIN_ISR": 1,
+        "KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS": 0,
+        "KAFKA_AUTO_CREATE_TOPICS_ENABLE": "true",
+        "KAFKA_NUM_PARTITIONS": 1,
+        "CLUSTER_ID": "MkU3OEVBNTcwNTJENDM2Qk"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "kafka-topics --bootstrap-server kafka:9092 --list >/dev/null 2>&1"
+        ],
+        "interval": "5s",
+        "timeout": "10s",
+        "retries": 30
+      }
+    },
+    "connect": {
+      "build": {
+        "context": "../..",
+        "dockerfile": "examples/aws-opensearch/Dockerfile.connect"
+      },
+      "depends_on": {
+        "kafka": {
+          "condition": "service_healthy"
+        }
+      },
+      "ports": [
+        "8083:8083"
+      ],
+      "environment": {
+        "CONNECT_BOOTSTRAP_SERVERS": "kafka:9092",
+        "CONNECT_REST_ADVERTISED_HOST_NAME": "connect",
+        "CONNECT_GROUP_ID": "aws-opensearch-connect",
+        "CONNECT_OFFSET_FLUSH_INTERVAL_MS": 1000,
+        "CONNECT_CONFIG_STORAGE_TOPIC": "_connect-configs",
+        "CONNECT_OFFSET_STORAGE_TOPIC": "_connect-offsets",
+        "CONNECT_STATUS_STORAGE_TOPIC": "_connect-status",
+        "CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR": 1,
+        "CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR": 1,
+        "CONNECT_STATUS_STORAGE_REPLICATION_FACTOR": 1,
+        "CONNECT_KEY_CONVERTER": "org.apache.kafka.connect.storage.StringConverter",
+        "CONNECT_VALUE_CONVERTER": "org.apache.kafka.connect.storage.StringConverter",
+        "CONNECT_PLUGIN_PATH": "/usr/share/java,/usr/share/confluent-hub-components",
+        "CONNECT_LOG4J_ROOT_LOGLEVEL": "INFO",
+        "CONNECT_CONFIG_PROVIDERS": "env",
+        "CONNECT_CONFIG_PROVIDERS_ENV_CLASS": "org.apache.kafka.common.config.provider.EnvVarConfigProvider",
+        "CONNECT_CONFIG_PROVIDERS_ENV_PARAM_ALLOWLIST": "AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "curl -fsS http://localhost:8083/connectors >/dev/null"
+        ],
+        "interval": "5s",
+        "timeout": "10s",
+        "retries": 30
+      }
+    },
+    "connect-setup": {
+      "build": {
+        "context": "../..",
+        "dockerfile": "examples/aws-opensearch/Dockerfile.tools"
+      },
+      "depends_on": {
+        "connect": {
+          "condition": "service_healthy"
+        },
+        "configure": {
+          "condition": "service_completed_successfully"
+        }
+      },
+      "volumes": [
+        "state:/state:ro"
+      ],
+      "command": [
+        "python",
+        "/demo/scripts/register_connectors.py"
+      ]
+    }
+  },
+  "volumes": {
+    "state": null,
+    "model-cache": null
+  }
+}

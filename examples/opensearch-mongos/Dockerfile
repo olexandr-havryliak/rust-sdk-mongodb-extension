@@ -1,16 +1,17 @@
 # syntax=docker/dockerfile:1
 ARG MONGO_IMAGE=mongodb/mongodb-community-server:9.0-ubi9
 FROM rust:bookworm AS builder
+ENV CARGO_BUILD_JOBS=2
 WORKDIR /build
 COPY Cargo.lock ./
 COPY extension-sys-mongodb ./extension-sys-mongodb
 COPY extension-sdk-mongodb ./extension-sdk-mongodb
-COPY examples/opensearch/extension-core ./examples/opensearch/extension-core
+COPY opensearch-extension-core ./opensearch-extension-core
 COPY examples/opensearch-mongos/extension ./examples/opensearch-mongos/extension
 RUN <<'EOF' cat > Cargo.toml
 [workspace]
 resolver = "2"
-members = ["extension-sys-mongodb", "extension-sdk-mongodb", "examples/opensearch/extension-core", "examples/opensearch-mongos/extension"]
+members = ["extension-sys-mongodb", "extension-sdk-mongodb", "opensearch-extension-core", "examples/opensearch-mongos/extension"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

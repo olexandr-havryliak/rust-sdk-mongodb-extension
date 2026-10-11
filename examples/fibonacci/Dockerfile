@@ -3,18 +3,21 @@
 ARG MONGO_IMAGE=mongodb/mongodb-community-server:9.0-ubi9
 
 FROM rust:bookworm AS builder
+ENV CARGO_BUILD_JOBS=2
 WORKDIR /build
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.lock ./
 COPY extension-sys-mongodb ./extension-sys-mongodb
 COPY extension-sdk-mongodb ./extension-sdk-mongodb
-# Workspace lists `e2e-tests/e2e-extension`; copy it so `cargo metadata` resolves (we only build fibonacci).
-COPY e2e-tests/e2e-extension ./e2e-tests/e2e-extension
-COPY e2e-tests/mongo-extension-fuzz ./e2e-tests/mongo-extension-fuzz
 COPY examples/fibonacci/fibonacci-extension ./examples/fibonacci/fibonacci-extension
-COPY examples/http-fetch/http-fetch-extension ./examples/http-fetch/http-fetch-extension
-COPY examples/data-federation/data-federation-extension ./examples/data-federation/data-federation-extension
-COPY examples/opensearch/extension-core ./examples/opensearch/extension-core
-COPY examples/opensearch/extension ./examples/opensearch/extension
+RUN <<'EOF' cat > Cargo.toml
+[workspace]
+resolver = "2"
+members = ["extension-sys-mongodb", "extension-sdk-mongodb", "examples/fibonacci/fibonacci-extension"]
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+EOF
 RUN cargo build -p fibonacci_extension --release
 
 FROM ${MONGO_IMAGE}
@@ -29,4 +32,4 @@ RUN mkdir -p /data/db /data/configdb \
     chown -R 999:999 /etc/mongo/extensions /usr/local/lib/mongo-extensions /data/db /data/configdb
 USER 999
 EXPOSE 27017
-CMD ["mongod", "--bind_ip_all", "--setParameter", "featureFlagExtensionsAPI=true", "--setParameter", "featureFlagExtensionsApiSignatureValidation=false", "--extensionsConfigPath", "/etc/mongo/extensions", "--loadExtensions", "fibonacci"]
+CMD ["mongod", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25", "--setParameter", "featureFlagExtensionsAPI=true", "--setParameter", "featureFlagExtensionsApiSignatureValidation=false", "--extensionsConfigPath", "/etc/mongo/extensions", "--loadExtensions", "fibonacci"]

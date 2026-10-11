@@ -1,4 +1,4 @@
-for (const name of ["range", "hashed", "compound", "unsharded"]) {
+for (const name of ["range", "hashed", "compound", "unsharded", "products"]) {
   print(name);
   printjson(db.getSiblingDB("search_demo").getCollection(name).aggregate([
     {$vectorSearch: {path: "description", query: "waterproof hiking jacket", limit: 4}},

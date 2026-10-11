@@ -8,5 +8,6 @@ RUN pip install --no-cache-dir -r /tests/requirements.txt
 COPY examples/opensearch/tests/test_sync.py /tests/test_sync.py
 COPY examples/opensearch/tests/test_recovery.py /tests/test_recovery.py
 COPY examples/opensearch/tests/test_connectors.py /tests/test_connectors.py
+COPY examples/opensearch/tests/test_http.py /tests/test_http.py
 
 CMD ["python", "/tests/test_sync.py"]

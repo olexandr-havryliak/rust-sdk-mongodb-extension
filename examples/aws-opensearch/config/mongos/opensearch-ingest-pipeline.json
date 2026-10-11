@@ -1,0 +1,28 @@
+{
+  "description": "Vectorize projected text; retain unindexed MongoDB document-key metadata",
+  "processors": [
+    {
+      "script": {
+        "lang": "painless",
+        "source": "ctx.remove('__mongodb'); def inputs = []; def fields = []; for (def entry : ctx.entrySet()) { def field = entry.getKey(); if (['_index', '_id', '_routing', '_version', '_version_type', '_dynamic_templates'].contains(field)) { continue; } if (field.startsWith('_') || field.endsWith('_embedding') || field.contains('.')) { throw new IllegalArgumentException('Reserved or non-flat field: ' + field); } def value = entry.getValue(); if (!(value instanceof String) || value.trim().length() == 0) { throw new IllegalArgumentException('Expected non-empty text for: ' + field); } fields.add(field); inputs.add(['text': value]); } ctx._vector_fields = fields; ctx._vector_inputs = inputs;"
+      }
+    },
+    {
+      "text_embedding": {
+        "if": "ctx._vector_inputs.size() > 0",
+        "model_id": "${MODEL_ID}",
+        "field_map": {
+          "_vector_inputs": {
+            "text": "embedding"
+          }
+        }
+      }
+    },
+    {
+      "script": {
+        "lang": "painless",
+        "source": "for (int i = 0; i < ctx._vector_inputs.size(); i++) { def field = ctx._vector_fields[i]; def vector = ctx._vector_inputs[i].embedding; if (vector == null || vector.size() != 384) { throw new IllegalArgumentException('Missing or invalid embedding for: ' + field); } ctx[field + '_embedding'] = vector; ctx.remove(field); } ctx.remove('_vector_inputs'); ctx.remove('_vector_fields'); ctx.__mongodb = ['documentKey': ctx._id];"
+      }
+    }
+  ]
+}

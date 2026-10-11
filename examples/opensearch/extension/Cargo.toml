@@ -9,9 +9,8 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-bson = "2.15"
 extension-sdk-mongodb = { path = "../../../extension-sdk-mongodb" }
-opensearch_extension_core = { path = "../extension-core" }
+opensearch_extension_core = { path = "../../../opensearch-extension-core" }
 
 [lints.rust]
 unsafe_code = "allow"

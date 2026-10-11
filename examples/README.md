@@ -2,9 +2,20 @@
 
 This directory holds **self-contained demos**: each example is a workspace member `cdylib` plus Docker assets and a `run-demo.sh` wrapper. They show how to use the **Rust SDK for MongoDB Extensions** against a real **MongoDB 9.0** image with the Extensions API enabled—not the SDK API reference (see the [repository root README](../README.md)).
 
-All example images default to **`mongodb/mongodb-community-server:9.0-ubi9`**. Their Dockerfiles write extension manifests under **`/etc/mongo/extensions`** and start **`mongod`** with **`featureFlagExtensionsAPI=true`**, **`--extensionsConfigPath /etc/mongo/extensions`**, and **`--loadExtensions ...`**. Because these demo libraries are unsigned local builds, the scripts set **`featureFlagExtensionsApiSignatureValidation=false`** for the demo containers.
+All MongoDB example images default to **`mongodb/mongodb-community-server:9.0-ubi9`**.
+Dockerfiles or setup scripts supply extension manifests under
+**`/etc/mongo/extensions`**. The selected **`mongod`** or **`mongos`** host enables
+**`featureFlagExtensionsAPI=true`**, **`--extensionsConfigPath /etc/mongo/extensions`**,
+and **`--loadExtensions ...`**. Unsigned local demo libraries use
+**`featureFlagExtensionsApiSignatureValidation=false`**; that is not production
+guidance. In router examples, shards and config servers do not load extensions.
 
-Each example’s **README** follows the same section order: summary → what the demo shows → stage shape → behaviour → requirements → run → keep stack running → image overrides → manual Compose → try in `mongosh`.
+Each example owns its Dockerfiles, Compose configuration, scripts, datasets and
+instructions. No example reads files from another example. OpenSearch stage and
+transport logic lives in the separate
+[OpenSearch core crate](../opensearch-extension-core/README.md); the SDK and core
+are the only shared application code. Demo mongod caches are limited to 256 MiB.
+Refer to each README for its topology-specific startup and cleanup commands.
 
 ## Index
 
@@ -14,8 +25,11 @@ Each example’s **README** follows the same section order: summary → what the
 | **http-fetch** | `$httpFetch` (map + EOF) | **27021** | [http-fetch/README.md](http-fetch/README.md) |
 | **data-federation** | `$readLocalJsonl` (JSONL under `allowedRoot`) | **27022** | [data-federation/README.md](data-federation/README.md) |
 | **opensearch** | `$vectorSearch` backed by OpenSearch, with MongoDB -> Kafka -> OpenSearch connectors | **27030**, **8083**, **9200**, **5601** | [opensearch/README.md](opensearch/README.md) |
+| **opensearch-mongos** | Router-only `$vectorSearch`, full document keys, two shards | **27040**, **8084**, **9201**, **5602** | [opensearch-mongos/README.md](opensearch-mongos/README.md) |
+| **aws-opensearch** | Both extensions, Floci domain, remote autoembeddings; optional real AWS | **27030** or **27040**, **8083**, **4566**, first domain **9400** | [aws-opensearch/README.md](aws-opensearch/README.md) |
 
-Use a **different host port per stack** so several examples (or `e2e-tests`) can run at once.
+Run the OpenSearch examples sequentially and remove containers/volumes before
+switching; they share some host ports.
 
 ## Quick try (`mongosh`)
 

@@ -1,5 +1,10 @@
 const assert = require("node:assert/strict");
 const demo = db.getSiblingDB("search_demo");
+const dataset = JSON.parse(require("fs").readFileSync("/datasets/outdoor-products.json", "utf8"));
+demo.products.bulkWrite(dataset.map(document => ({
+  replaceOne: {filter: {_id: document._id}, replacement: document, upsert: true},
+})));
+assert.equal(demo.products.countDocuments({}), dataset.length);
 for (const name of ["range", "hashed", "compound"]) {
   const documents = [
     {_id: "shared", tenant: -1, title: "Rain shell", description: "Waterproof hiking jacket for rainy mountain trails"},

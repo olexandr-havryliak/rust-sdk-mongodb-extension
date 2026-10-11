@@ -1,0 +1,34 @@
+name: aws-opensearch-cloud
+services:
+  floci:
+    profiles: [local-emulator]
+  embeddings:
+    profiles: [local-emulator]
+  setup:
+    profiles: [local-emulator]
+  configure:
+    depends_on: !reset {}
+    command: [python, /demo/scripts/setup_aws.py]
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?Set AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?Set AWS_SECRET_ACCESS_KEY}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:?Set AWS_DEFAULT_REGION}
+      AWS_OPENSEARCH_ENDPOINT: ${AWS_OPENSEARCH_ENDPOINT:-}
+      AWS_BEDROCK_REGION: ${AWS_BEDROCK_REGION:-}
+      AWS_BEDROCK_ROLE_ARN: ${AWS_BEDROCK_ROLE_ARN:?Set AWS_BEDROCK_ROLE_ARN}
+      AWS_CONNECT_ROLE_ARN: ${AWS_CONNECT_ROLE_ARN:-}
+      AWS_PROVISION_DOMAIN: ${AWS_PROVISION_DOMAIN:-false}
+      AWS_DOMAIN_NAME: ${AWS_DOMAIN_NAME:-}
+      AWS_DOMAIN_PRINCIPAL_ARN: ${AWS_DOMAIN_PRINCIPAL_ARN:-}
+      OPENSEARCH_MODEL_ID: ${OPENSEARCH_MODEL_ID:-}
+  connect:
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_REGION: ${AWS_DEFAULT_REGION}
+  connect-setup:
+    environment:
+      OPENSEARCH_AWS_REGION: ${AWS_DEFAULT_REGION}
+      AWS_CONNECT_ROLE_ARN: ${AWS_CONNECT_ROLE_ARN:-}

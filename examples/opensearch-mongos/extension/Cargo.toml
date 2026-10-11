@@ -9,8 +9,5 @@ description = "Router-only OpenSearch vector search for sharded MongoDB collecti
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-bson = "2.15"
 extension-sdk-mongodb = { path = "../../../extension-sdk-mongodb" }
-opensearch_extension_core = { path = "../../opensearch/extension-core" }
-serde_json = "1"
-ureq = { version = "2.12", default-features = false, features = ["json"] }
+opensearch_extension_core = { path = "../../../opensearch-extension-core" }

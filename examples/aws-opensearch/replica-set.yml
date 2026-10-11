@@ -1,0 +1,114 @@
+{
+  "services": {
+    "configure": {
+      "environment": {
+        "TOPOLOGY": "replica-set"
+      }
+    },
+    "tools": {
+      "environment": {
+        "TOPOLOGY": "replica-set"
+      }
+    },
+    "mongo": {
+      "build": {
+        "context": "../..",
+        "dockerfile": "examples/aws-opensearch/Dockerfile.mongo",
+        "target": "replica-set",
+        "args": {
+          "MONGO_IMAGE": "${MONGO_IMAGE:-mongodb/mongodb-community-server:9.0-ubi9}"
+        }
+      },
+      "command": [
+        "mongod",
+        "--replSet",
+        "rs0",
+        "--bind_ip_all",
+        "--wiredTigerCacheSizeGB",
+        "0.25",
+        "--setParameter",
+        "featureFlagExtensionsAPI=true",
+        "--setParameter",
+        "featureFlagExtensionsApiSignatureValidation=false",
+        "--extensionsConfigPath",
+        "/etc/mongo/extensions",
+        "--loadExtensions",
+        "opensearch"
+      ],
+      "ports": [
+        "27030:27017"
+      ],
+      "volumes": [
+        "./scripts/replica-set:/scripts:ro",
+        "state:/etc/mongo/extensions:ro"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "mongosh --quiet --eval 'process.exit(db.adminCommand({ping:1}).ok ? 0 : 1)'"
+        ],
+        "interval": "3s",
+        "timeout": "5s",
+        "retries": 40,
+        "start_period": "15s"
+      },
+      "depends_on": {
+        "configure": {
+          "condition": "service_completed_successfully"
+        }
+      },
+      "environment": {
+        "OPENSEARCH_AWS_REGION": "${OPENSEARCH_AWS_REGION:-us-east-1}",
+        "OPENSEARCH_AWS_ALLOW_HTTP": "${OPENSEARCH_AWS_ALLOW_HTTP:-true}",
+        "AWS_ACCESS_KEY_ID": "${AWS_ACCESS_KEY_ID:-test}",
+        "AWS_SECRET_ACCESS_KEY": "${AWS_SECRET_ACCESS_KEY:-test}",
+        "AWS_SESSION_TOKEN": "${AWS_SESSION_TOKEN:-}"
+      }
+    },
+    "mongo-init": {
+      "image": "${MONGO_IMAGE:-mongodb/mongodb-community-server:9.0-ubi9}",
+      "depends_on": {
+        "mongo": {
+          "condition": "service_healthy"
+        }
+      },
+      "volumes": [
+        "./scripts/replica-set:/scripts:ro"
+      ],
+      "command": [
+        "mongosh",
+        "mongodb://mongo:27017/admin",
+        "/scripts/init-replica-set.js"
+      ],
+      "restart": "no"
+    },
+    "mongo-seed": {
+      "image": "${MONGO_IMAGE:-mongodb/mongodb-community-server:9.0-ubi9}",
+      "depends_on": {
+        "mongo-init": {
+          "condition": "service_completed_successfully"
+        }
+      },
+      "volumes": [
+        "./scripts/replica-set:/scripts:ro",
+        "./datasets:/datasets:ro"
+      ],
+      "command": [
+        "mongosh",
+        "mongodb://mongo:27017/search_demo?replicaSet=rs0",
+        "/scripts/seed.js"
+      ],
+      "restart": "no"
+    },
+    "connect-setup": {
+      "environment": {
+        "TOPOLOGY": "replica-set"
+      },
+      "depends_on": {
+        "mongo-seed": {
+          "condition": "service_completed_successfully"
+        }
+      }
+    }
+  }
+}

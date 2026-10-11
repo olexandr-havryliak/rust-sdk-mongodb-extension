@@ -121,7 +121,8 @@
         "27040:27017"
       ],
       "volumes": [
-        "./scripts:/scripts:ro"
+        "./scripts:/scripts:ro",
+        "./datasets:/datasets:ro"
       ],
       "healthcheck": {
         "test": [
@@ -166,7 +167,7 @@
     "connect": {
       "build": {
         "context": "../..",
-        "dockerfile": "examples/opensearch/Dockerfile.connect"
+        "dockerfile": "examples/opensearch-mongos/Dockerfile.connect"
       },
       "ports": [
         "8084:8083"
@@ -203,7 +204,7 @@
       }
     },
     "opensearch": {
-      "image": "${OPENSEARCH_IMAGE:-opensearchproject/opensearch:2.19.0}",
+      "image": "${OPENSEARCH_IMAGE:-opensearchproject/opensearch:2.19.6}",
       "environment": {
         "discovery.type": "single-node",
         "plugins.security.disabled": "true",
@@ -238,7 +239,7 @@
         }
       },
       "volumes": [
-        "../opensearch/scripts/register-opensearch-model.py:/register-opensearch-model.py:ro",
+        "./scripts/register-opensearch-model.py:/register-opensearch-model.py:ro",
         "opensearch-model:/model"
       ],
       "environment": {
@@ -258,7 +259,7 @@
         }
       },
       "volumes": [
-        "../opensearch/scripts:/scripts:ro",
+        "./scripts:/scripts:ro",
         "./config:/config:ro",
         "opensearch-model:/model:ro"
       ],
@@ -291,29 +292,31 @@
     "tests": {
       "build": {
         "context": "../..",
-        "dockerfile": "examples/opensearch/tests/Dockerfile"
+        "dockerfile": "examples/opensearch-mongos/tests/Dockerfile"
       },
       "profiles": [
         "test"
       ],
       "volumes": [
-        ".:/demo:ro"
+        ".:/demo:ro",
+        "./datasets:/datasets:ro"
       ],
       "working_dir": "/demo/tests",
+      "environment": {
+        "PYTHONPATH": "/tests"
+      },
       "command": [
         "python",
         "-m",
         "unittest",
         "-v",
         "test_configuration",
+        "test_http",
         "test_flow"
       ]
     },
     "opensearch-dashboards": {
-      "image": "opensearchproject/opensearch-dashboards:2.19.0",
-      "profiles": [
-        "dashboards"
-      ],
+      "image": "opensearchproject/opensearch-dashboards:2.19.6",
       "depends_on": {
         "opensearch": {
           "condition": "service_healthy"

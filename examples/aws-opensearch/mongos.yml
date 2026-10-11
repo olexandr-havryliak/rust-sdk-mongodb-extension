@@ -1,0 +1,170 @@
+{
+  "services": {
+    "configure": {
+      "environment": {
+        "TOPOLOGY": "mongos"
+      }
+    },
+    "connect-setup": {
+      "environment": {
+        "TOPOLOGY": "mongos"
+      }
+    },
+    "tools": {
+      "environment": {
+        "TOPOLOGY": "mongos"
+      }
+    },
+    "config": {
+      "image": "${MONGO_IMAGE:-mongodb/mongodb-community-server:9.0-ubi9}",
+      "entrypoint": [
+        "mongod"
+      ],
+      "command": [
+        "--configsvr",
+        "--replSet",
+        "csrs",
+        "--port",
+        "27017",
+        "--bind_ip_all",
+        "--wiredTigerCacheSizeGB",
+        "0.25"
+      ],
+      "environment": {
+        "RS_NAME": "csrs",
+        "RS_HOST": "config:27017",
+        "RS_CONFIG": "true"
+      },
+      "volumes": [
+        "./scripts/mongos:/scripts:ro"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "mongosh --quiet --eval 'process.exit(db.adminCommand({ping:1}).ok ? 0 : 1)'"
+        ],
+        "interval": "3s",
+        "timeout": "5s",
+        "retries": 40
+      }
+    },
+    "shard0": {
+      "image": "${MONGO_IMAGE:-mongodb/mongodb-community-server:9.0-ubi9}",
+      "entrypoint": [
+        "mongod"
+      ],
+      "command": [
+        "--shardsvr",
+        "--replSet",
+        "shard0",
+        "--port",
+        "27017",
+        "--bind_ip_all",
+        "--wiredTigerCacheSizeGB",
+        "0.25"
+      ],
+      "environment": {
+        "RS_NAME": "shard0",
+        "RS_HOST": "shard0:27017"
+      },
+      "volumes": [
+        "./scripts/mongos:/scripts:ro"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "mongosh --quiet --eval 'process.exit(db.adminCommand({ping:1}).ok ? 0 : 1)'"
+        ],
+        "interval": "3s",
+        "timeout": "5s",
+        "retries": 40
+      }
+    },
+    "shard1": {
+      "image": "${MONGO_IMAGE:-mongodb/mongodb-community-server:9.0-ubi9}",
+      "entrypoint": [
+        "mongod"
+      ],
+      "command": [
+        "--shardsvr",
+        "--replSet",
+        "shard1",
+        "--port",
+        "27017",
+        "--bind_ip_all",
+        "--wiredTigerCacheSizeGB",
+        "0.25"
+      ],
+      "environment": {
+        "RS_NAME": "shard1",
+        "RS_HOST": "shard1:27017"
+      },
+      "volumes": [
+        "./scripts/mongos:/scripts:ro"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "mongosh --quiet --eval 'process.exit(db.adminCommand({ping:1}).ok ? 0 : 1)'"
+        ],
+        "interval": "3s",
+        "timeout": "5s",
+        "retries": 40
+      }
+    },
+    "mongos": {
+      "build": {
+        "context": "../..",
+        "dockerfile": "examples/aws-opensearch/Dockerfile.mongo",
+        "target": "mongos",
+        "args": {
+          "MONGO_IMAGE": "${MONGO_IMAGE:-mongodb/mongodb-community-server:9.0-ubi9}"
+        }
+      },
+      "command": [
+        "--configdb",
+        "csrs/config:27017",
+        "--port",
+        "27017",
+        "--bind_ip_all",
+        "--setParameter",
+        "featureFlagExtensionsAPI=true",
+        "--setParameter",
+        "featureFlagExtensionsApiSignatureValidation=false",
+        "--extensionsConfigPath",
+        "/etc/mongo/extensions",
+        "--loadExtensions",
+        "opensearch_mongos"
+      ],
+      "ports": [
+        "27040:27017"
+      ],
+      "volumes": [
+        "./scripts/mongos:/scripts:ro",
+        "./datasets:/datasets:ro",
+        "state:/etc/mongo/extensions:ro"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "mongosh --quiet --eval 'process.exit(db.adminCommand({ping:1}).ok ? 0 : 1)'"
+        ],
+        "interval": "3s",
+        "timeout": "5s",
+        "retries": 40
+      },
+      "depends_on": {
+        "configure": {
+          "condition": "service_completed_successfully"
+        }
+      },
+      "environment": {
+        "OPENSEARCH_AWS_REGION": "${OPENSEARCH_AWS_REGION:-us-east-1}",
+        "OPENSEARCH_AWS_ALLOW_HTTP": "${OPENSEARCH_AWS_ALLOW_HTTP:-true}",
+        "AWS_ACCESS_KEY_ID": "${AWS_ACCESS_KEY_ID:-test}",
+        "AWS_SECRET_ACCESS_KEY": "${AWS_SECRET_ACCESS_KEY:-test}",
+        "AWS_SESSION_TOKEN": "${AWS_SESSION_TOKEN:-}"
+      }
+    }
+  }
+}
