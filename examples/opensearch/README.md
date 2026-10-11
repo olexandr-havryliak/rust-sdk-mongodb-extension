@@ -114,8 +114,9 @@ db.products.aggregate([
 Results are full MongoDB documents plus the projected score, including fields
 not sent to OpenSearch. No query vector, model ID, or MongoDB search index is
 required. Only `path: "description"` is indexed in this demo. The optional filter is OpenSearch DSL, not
-MongoDB query syntax; domain scalar fields are unavailable in this vector-only
-index. `$search` is not registered by this extension.
+MongoDB query syntax, limited to the clauses listed in
+[Query Safety Limits](../../opensearch-extension-core/README.md#query-safety-limits);
+domain scalar fields are unavailable in this vector-only index. `$search` is not registered by this extension.
 
 ### 6. Delete
 

@@ -5,11 +5,9 @@ use std::ptr::NonNull;
 use crate::error::{ExtensionError, Result};
 use crate::extension_log;
 use crate::host;
-use crate::operation_metrics::SdkOperationMetrics;
+use crate::operation_metrics::SharedMetrics;
 use crate::status;
-use crate::sys::{
-    MongoExtensionOperationMetrics, MongoExtensionQueryExecutionContext, MONGO_EXTENSION_STATUS_OK,
-};
+use crate::sys::{MongoExtensionQueryExecutionContext, MONGO_EXTENSION_STATUS_OK};
 
 /// Collection metadata captured while binding an extension stage.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +42,7 @@ impl CatalogContext {
 #[derive(Debug)]
 pub struct StageContext {
     query_ctx: Option<NonNull<MongoExtensionQueryExecutionContext>>,
-    metrics: Option<NonNull<MongoExtensionOperationMetrics>>,
+    metrics: Option<SharedMetrics>,
     catalog: Option<CatalogContext>,
 }
 
@@ -67,10 +65,10 @@ impl StageContext {
     pub(crate) fn bind_execution(
         &mut self,
         query_ctx: *mut MongoExtensionQueryExecutionContext,
-        metrics: *mut MongoExtensionOperationMetrics,
+        metrics: Option<SharedMetrics>,
     ) {
         self.query_ctx = NonNull::new(query_ctx);
-        self.metrics = NonNull::new(metrics);
+        self.metrics = metrics;
     }
 
     /// Clears execution binding (used after a generator step completes internal work).
@@ -190,8 +188,7 @@ impl StageContext {
     /// No-op if metrics were not bound for this call.
     pub fn metrics(&mut self) -> OperationMetricsSink<'_> {
         OperationMetricsSink {
-            metrics: self.metrics,
-            _lt: std::marker::PhantomData,
+            metrics: self.metrics.as_deref(),
         }
     }
 }
@@ -202,37 +199,109 @@ impl Default for StageContext {
     }
 }
 
-/// Incremental updates to [`SdkOperationMetrics`](crate::operation_metrics::SdkOperationMetrics).
+/// Incremental updates to the stage's BSON metrics document.
 pub struct OperationMetricsSink<'a> {
-    metrics: Option<NonNull<MongoExtensionOperationMetrics>>,
-    _lt: std::marker::PhantomData<&'a mut ()>,
+    metrics: Option<&'a std::sync::Mutex<bson::Document>>,
 }
 
 impl OperationMetricsSink<'_> {
     /// Adds `delta` to the signed integer stored at `key` (defaults missing keys to `0`).
     pub fn inc(&mut self, key: &str, delta: i64) {
-        let Some(p) = self.metrics else {
-            return;
-        };
-        let p = p.as_ptr().cast::<SdkOperationMetrics>();
-        unsafe {
-            if let Ok(mut g) = (*p).doc.lock() {
-                let prev = g.get(key).and_then(|b| b.as_i64()).unwrap_or(0);
-                g.insert(key, bson::Bson::Int64(prev.saturating_add(delta)));
-            }
+        if let Some(Ok(mut g)) = self.metrics.map(|m| m.lock()) {
+            let prev = g.get(key).and_then(|b| b.as_i64()).unwrap_or(0);
+            g.insert(key, bson::Bson::Int64(prev.saturating_add(delta)));
         }
     }
 
     /// Stores `elapsed_ns` for `key` (overwrites previous value).
     pub fn record_time(&mut self, key: &str, elapsed_ns: u64) {
-        let Some(p) = self.metrics else {
-            return;
-        };
-        let p = p.as_ptr().cast::<SdkOperationMetrics>();
-        unsafe {
-            if let Ok(mut g) = (*p).doc.lock() {
-                g.insert(key, bson::Bson::Int64(elapsed_ns as i64));
-            }
+        if let Some(Ok(mut g)) = self.metrics.map(|m| m.lock()) {
+            g.insert(key, bson::Bson::Int64(elapsed_ns as i64));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sys::{
+        MongoExtensionByteView, MongoExtensionExecAggStage, MongoExtensionOperationMetrics,
+        MongoExtensionQueryExecutionContextVTable, MongoExtensionStatus,
+    };
+
+    const INTERRUPTED: i32 = 11601;
+
+    unsafe extern "C" fn killed(
+        _: *const MongoExtensionQueryExecutionContext,
+        query_status: *mut MongoExtensionStatus,
+    ) -> *mut MongoExtensionStatus {
+        let vt = (*query_status).vtable;
+        ((*vt).set_code)(query_status, INTERRUPTED);
+        let reason = b"operation was interrupted";
+        let ret = ((*vt).set_reason)(
+            query_status,
+            MongoExtensionByteView {
+                data: reason.as_ptr(),
+                len: reason.len() as u64,
+            },
+        );
+        ((*(*ret).vtable).destroy)(ret);
+        status::status_ok()
+    }
+
+    unsafe extern "C" fn alive(
+        _: *const MongoExtensionQueryExecutionContext,
+        _: *mut MongoExtensionStatus,
+    ) -> *mut MongoExtensionStatus {
+        status::status_ok()
+    }
+
+    unsafe extern "C" fn no_metrics(
+        _: *const MongoExtensionQueryExecutionContext,
+        _: *mut MongoExtensionExecAggStage,
+        _: *mut *mut MongoExtensionOperationMetrics,
+    ) -> *mut MongoExtensionStatus {
+        status::status_ok()
+    }
+
+    unsafe extern "C" fn no_deadline(
+        _: *const MongoExtensionQueryExecutionContext,
+        out: *mut i64,
+    ) -> *mut MongoExtensionStatus {
+        *out = i64::MAX;
+        status::status_ok()
+    }
+
+    fn check_with(
+        check_for_interrupt: unsafe extern "C" fn(
+            *const MongoExtensionQueryExecutionContext,
+            *mut MongoExtensionStatus,
+        ) -> *mut MongoExtensionStatus,
+    ) -> Result<()> {
+        let vtable = MongoExtensionQueryExecutionContextVTable {
+            check_for_interrupt,
+            get_metrics: no_metrics,
+            get_deadline_timestamp_ms: no_deadline,
+        };
+        let mut query_ctx = MongoExtensionQueryExecutionContext { vtable: &vtable };
+        let mut ctx = StageContext::new();
+        ctx.bind_execution(&mut query_ctx, None);
+        ctx.check_interrupt()
+    }
+
+    #[test]
+    fn check_interrupt_reports_killed_operation() {
+        assert_eq!(
+            check_with(killed),
+            Err(ExtensionError::HostError {
+                code: INTERRUPTED,
+                reason: "operation was interrupted".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn check_interrupt_continues_for_live_operation() {
+        assert_eq!(check_with(alive), Ok(()));
     }
 }

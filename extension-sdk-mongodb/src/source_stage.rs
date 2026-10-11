@@ -7,7 +7,7 @@
 //!
 //! Use [`export_source_stage!`](crate::export_source_stage) from the crate root.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::sync::OnceLock;
 
@@ -17,6 +17,7 @@ use crate::byte_buf;
 use crate::error::ExtensionError;
 use crate::expansion::Expansion;
 use crate::host;
+use crate::operation_metrics::SharedMetrics;
 use crate::panics::ffi_boundary;
 use crate::stage_context::{CatalogContext, StageContext};
 use crate::stage_model::StagePlan;
@@ -892,8 +893,8 @@ struct ExecObj {
     /// See [`MODE_INIT`] / [`MODE_PASSTHROUGH`] / [`MODE_GENERATOR`].
     mode: Cell<u8>,
     saw_upstream_advanced: Cell<bool>,
-    /// Host metrics object created in [`exec_create_metrics`](exec_create_metrics).
-    metrics: Cell<*mut MongoExtensionOperationMetrics>,
+    /// Stage handle to the metrics document of the host-owned object from [`exec_create_metrics`].
+    metrics: RefCell<Option<SharedMetrics>>,
 }
 
 fn exec_alloc(args: Vec<u8>, catalog: Option<CatalogContext>, ops: &'static SourceOps) -> ExecObj {
@@ -909,7 +910,7 @@ fn exec_alloc(args: Vec<u8>, catalog: Option<CatalogContext>, ops: &'static Sour
         generator_done: Cell::new(false),
         mode: Cell::new(MODE_INIT),
         saw_upstream_advanced: Cell::new(false),
-        metrics: Cell::new(std::ptr::null_mut()),
+        metrics: RefCell::new(None),
     }
 }
 
@@ -921,14 +922,6 @@ unsafe extern "C" fn exec_destroy(p: *mut MongoExtensionExecAggStage) {
     let ops = (*this).ops;
     if !(*this).state.is_null() {
         (ops.drop_state)((*this).state);
-    }
-    let m = (*this).metrics.get();
-    if !m.is_null() {
-        unsafe {
-            let vt = (*m).vtable;
-            ((*vt).destroy)(m);
-        }
-        (*this).metrics.set(std::ptr::null_mut());
     }
     drop(Box::from_raw(this));
 }
@@ -1023,8 +1016,7 @@ unsafe extern "C" fn exec_get_next(
         }
         let mut sctx = StageContext::new();
         sctx.bind_catalog((*this).catalog.clone());
-        let metrics = (*this).metrics.get();
-        sctx.bind_execution(ctx, metrics);
+        sctx.bind_execution(ctx, (*this).metrics.borrow().clone());
         let out = (ops.next)((*this).state, &mut sctx)?;
         sctx.unbind_execution();
         match out {
@@ -1092,8 +1084,8 @@ unsafe extern "C" fn exec_create_metrics(
     out: *mut *mut MongoExtensionOperationMetrics,
 ) -> *mut MongoExtensionStatus {
     let this = exec.cast::<ExecObj>();
-    let m = crate::operation_metrics::alloc_sdk_operation_metrics();
-    (*this).metrics.set(m);
+    let (m, doc) = crate::operation_metrics::alloc_sdk_operation_metrics();
+    *(*this).metrics.borrow_mut() = Some(doc);
     *out = m;
     status::status_ok()
 }
@@ -1566,6 +1558,77 @@ mod catalog_tests {
         let mut expected = vec![None, None];
         expected.extend(vec![Some(catalog); 4]);
         assert_eq!(observed, expected);
+    }
+
+    unsafe fn counting_next(
+        state: *mut c_void,
+        ctx: &mut StageContext,
+    ) -> crate::error::Result<Next> {
+        ctx.metrics().inc("rows", 1);
+        next(state, ctx)
+    }
+    static METRICS_OPS: SourceOps = SourceOps {
+        next: counting_next,
+        ..OPS
+    };
+
+    unsafe fn pull_and_release(exec: *mut MongoExtensionExecAggStage) {
+        let mut result = std::mem::MaybeUninit::<MongoExtensionGetNextResult>::uninit();
+        assert_ok(exec_get_next(
+            exec,
+            std::ptr::null_mut(),
+            result.as_mut_ptr(),
+        ));
+        let result = result.assume_init();
+        if result.code == MongoExtensionGetNextResultCode::kAdvanced {
+            let buffer = result.result_document.bytes.buf;
+            ((*(*buffer).vtable).destroy)(buffer);
+        }
+    }
+
+    unsafe fn serialized_metrics(m: *mut MongoExtensionOperationMetrics) -> Document {
+        let mut out = std::ptr::null_mut();
+        assert_ok(((*(*m).vtable).serialize)(m, &mut out));
+        let view = ((*(*out).vtable).get_view)(out);
+        let doc = Document::from_reader(std::slice::from_raw_parts(view.data, view.len as usize))
+            .unwrap();
+        ((*(*out).vtable).destroy)(out);
+        doc
+    }
+
+    fn metrics_exec() -> *mut MongoExtensionExecAggStage {
+        Box::into_raw(Box::new(exec_alloc(
+            bson::to_vec(&doc! {}).unwrap(),
+            None,
+            &METRICS_OPS,
+        )))
+        .cast()
+    }
+
+    #[test]
+    fn host_owned_metrics_outlive_exec_stage() {
+        unsafe {
+            let exec = metrics_exec();
+            let mut metrics = std::ptr::null_mut();
+            assert_ok(exec_create_metrics(exec, &mut metrics));
+            pull_and_release(exec);
+            exec_destroy(exec);
+            assert_eq!(serialized_metrics(metrics).get_i64("rows"), Ok(1));
+            ((*(*metrics).vtable).destroy)(metrics);
+        }
+    }
+
+    #[test]
+    fn exec_stage_survives_host_destroying_metrics_first() {
+        unsafe {
+            let exec = metrics_exec();
+            let mut metrics = std::ptr::null_mut();
+            assert_ok(exec_create_metrics(exec, &mut metrics));
+            ((*(*metrics).vtable).destroy)(metrics);
+            pull_and_release(exec);
+            pull_and_release(exec);
+            exec_destroy(exec);
+        }
     }
 
     fn panic_properties() -> Document {

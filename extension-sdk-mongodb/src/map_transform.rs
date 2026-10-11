@@ -715,6 +715,30 @@ fn document_from_byte_container(c: &MongoExtensionByteContainer) -> Result<Docum
     Document::from_reader(bytes).map_err(|e| format!("decode result_document: {e}"))
 }
 
+fn empty_byte_container() -> MongoExtensionByteContainer {
+    MongoExtensionByteContainer {
+        type_: MongoExtensionByteContainerType::kByteView,
+        bytes: MongoExtensionByteContainerBytes {
+            view: MongoExtensionByteView {
+                data: std::ptr::null(),
+                len: 0,
+            },
+        },
+    }
+}
+
+/// Destroys a `kByteBuf` whose ownership the upstream stage transferred to this stage.
+fn release_byte_container(c: MongoExtensionByteContainer) {
+    if c.type_ == MongoExtensionByteContainerType::kByteBuf {
+        unsafe {
+            let buf = c.bytes.buf;
+            if !buf.is_null() {
+                ((*(*buf).vtable).destroy)(buf);
+            }
+        }
+    }
+}
+
 #[repr(C)]
 struct ExecObj {
     base: MongoExtensionExecAggStage,
@@ -779,8 +803,11 @@ unsafe extern "C" fn exec_get_next(
 
     if (*res).code == MongoExtensionGetNextResultCode::kAdvanced {
         (*this).saw_upstream_advanced.set(true);
+        let upstream_doc = std::mem::replace(&mut (*res).result_document, empty_byte_container());
+        let row = document_from_byte_container(&upstream_doc);
+        release_byte_container(upstream_doc);
         let mapped = ffi_boundary(|| -> Result<(), String> {
-            let row = document_from_byte_container(&(*res).result_document)?;
+            let row = row?;
             let args_bytes: &[u8] = &(*this).args;
             let args = Document::from_reader(args_bytes).map_err(|e| e.to_string())?;
             let mg = map_globals();
@@ -1038,4 +1065,156 @@ pub unsafe fn get_map_extension_impl(
     let obj = addr as *const ExtensionObj;
     *extension_out = std::ptr::addr_of!((*obj).base);
     status::status_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sys::{
+        MongoExtensionByteBuf, MongoExtensionByteBufVTable, MONGO_EXTENSION_STATUS_OK,
+    };
+    use bson::doc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    fn tag_row(row: &Document, _: &Document) -> Result<Document, String> {
+        if row.get_bool("fail").unwrap_or(false) {
+            return Err("transform rejected row".into());
+        }
+        let mut out = row.clone();
+        out.insert("mapped", true);
+        Ok(out)
+    }
+
+    fn install_globals() {
+        let _ = MAP_ACTIVE_STAGE.get_or_init(|| MapStageGlobals {
+            name: "$leakProbe",
+            expect_empty: false,
+            transform: tag_row,
+            on_eof_no_rows: None,
+            on_extension_initialized: None,
+            static_properties_doc: crate::stage_properties::default_map_stage_static_properties,
+            expand_from_args_doc: None,
+        });
+    }
+
+    #[repr(C)]
+    struct CountedBuf {
+        base: MongoExtensionByteBuf,
+        data: Vec<u8>,
+        destroyed: Arc<AtomicUsize>,
+    }
+
+    unsafe extern "C" fn counted_destroy(p: *mut MongoExtensionByteBuf) {
+        let b = Box::from_raw(p.cast::<CountedBuf>());
+        b.destroyed.fetch_add(1, Ordering::SeqCst);
+    }
+
+    unsafe extern "C" fn counted_view(p: *const MongoExtensionByteBuf) -> MongoExtensionByteView {
+        let d = &(*p.cast::<CountedBuf>()).data;
+        MongoExtensionByteView {
+            data: d.as_ptr(),
+            len: d.len() as u64,
+        }
+    }
+
+    static COUNTED_VTABLE: MongoExtensionByteBufVTable = MongoExtensionByteBufVTable {
+        destroy: counted_destroy,
+        get_view: counted_view,
+    };
+
+    #[repr(C)]
+    struct OwnedBufUpstream {
+        base: MongoExtensionExecAggStage,
+        row: Document,
+        destroyed: Arc<AtomicUsize>,
+    }
+
+    unsafe extern "C" fn upstream_get_next(
+        p: *mut MongoExtensionExecAggStage,
+        _: *mut MongoExtensionQueryExecutionContext,
+        res: *mut MongoExtensionGetNextResult,
+    ) -> *mut MongoExtensionStatus {
+        let this = &*p.cast::<OwnedBufUpstream>();
+        let buf = Box::into_raw(Box::new(CountedBuf {
+            base: MongoExtensionByteBuf {
+                vtable: &COUNTED_VTABLE,
+            },
+            data: bson::to_vec(&this.row).unwrap(),
+            destroyed: Arc::clone(&this.destroyed),
+        }));
+        (*res).code = MongoExtensionGetNextResultCode::kAdvanced;
+        (*res).result_document = MongoExtensionByteContainer {
+            type_: MongoExtensionByteContainerType::kByteBuf,
+            bytes: MongoExtensionByteContainerBytes { buf: buf.cast() },
+        };
+        (*res).result_metadata = MongoExtensionByteContainer {
+            type_: MongoExtensionByteContainerType::kByteView,
+            bytes: MongoExtensionByteContainerBytes {
+                view: MongoExtensionByteView {
+                    data: std::ptr::null(),
+                    len: 0,
+                },
+            },
+        };
+        status::status_ok()
+    }
+
+    static UPSTREAM_VTABLE: MongoExtensionExecAggStageVTable = MongoExtensionExecAggStageVTable {
+        get_next: upstream_get_next,
+        ..EXEC_VTABLE
+    };
+
+    /// Pulls one row through the map stage; returns (status code, mapped document, upstream frees).
+    unsafe fn map_one(row: Document) -> (i32, Option<Document>, usize) {
+        install_globals();
+        let destroyed = Arc::new(AtomicUsize::new(0));
+        let mut upstream = OwnedBufUpstream {
+            base: MongoExtensionExecAggStage {
+                vtable: &UPSTREAM_VTABLE,
+            },
+            row,
+            destroyed: Arc::clone(&destroyed),
+        };
+        let exec = Box::into_raw(Box::new(exec_alloc(bson::to_vec(&doc! {}).unwrap())))
+            .cast::<MongoExtensionExecAggStage>();
+        let st = exec_set_source(exec, std::ptr::addr_of_mut!(upstream).cast());
+        ((*(*st).vtable).destroy)(st);
+        let mut res = std::mem::MaybeUninit::<MongoExtensionGetNextResult>::uninit();
+        let st = exec_get_next(exec, std::ptr::null_mut(), res.as_mut_ptr());
+        let code = ((*(*st).vtable).get_code)(st);
+        ((*(*st).vtable).destroy)(st);
+        let res = res.assume_init();
+        let mapped = if code == MONGO_EXTENSION_STATUS_OK {
+            let buf = res.result_document.bytes.buf;
+            let view = ((*(*buf).vtable).get_view)(buf);
+            let d = Document::from_reader(std::slice::from_raw_parts(view.data, view.len as usize))
+                .unwrap();
+            ((*(*buf).vtable).destroy)(buf);
+            Some(d)
+        } else {
+            None
+        };
+        exec_destroy(exec);
+        (code, mapped, destroyed.load(Ordering::SeqCst))
+    }
+
+    #[test]
+    fn mapped_row_releases_upstream_owned_buffer() {
+        let (code, mapped, freed) = unsafe { map_one(doc! { "_id": 1 }) };
+        assert_eq!(code, MONGO_EXTENSION_STATUS_OK);
+        assert_eq!(mapped, Some(doc! { "_id": 1, "mapped": true }));
+        assert_eq!(freed, 1, "upstream kByteBuf must be destroyed exactly once");
+    }
+
+    #[test]
+    fn failed_transform_releases_upstream_owned_buffer() {
+        let (code, mapped, freed) = unsafe { map_one(doc! { "_id": 2, "fail": true }) };
+        assert_ne!(code, MONGO_EXTENSION_STATUS_OK);
+        assert_eq!(mapped, None);
+        assert_eq!(
+            freed, 1,
+            "upstream kByteBuf must be destroyed on errors too"
+        );
+    }
 }

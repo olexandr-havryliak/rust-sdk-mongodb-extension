@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, ffi::c_void, time::Duration};
+use std::{collections::VecDeque, ffi::c_void};
 
 use crate::{opensearch_body, parse_config, parse_vector_search_args, OpenSearchConfig, QueryArgs};
 use bson::{doc, Bson, Document};
@@ -93,12 +93,6 @@ impl SourceStage for RouterVectorSearch {
                 )));
             }
         }
-        if args
-            .get("filter")
-            .is_some_and(|v| !matches!(v, Bson::Document(_)))
-        {
-            return Err(ExtensionError::BadValue("filter must be a document".into()));
-        }
         if let Some(limit) = args.get("limit") {
             if !matches!(limit, Bson::Int32(_) | Bson::Int64(_)) {
                 return Err(ExtensionError::BadValue("limit must be an integer".into()));
@@ -163,7 +157,7 @@ impl SourceStage for RouterVectorSearch {
     }
 }
 
-fn decode_response(value: Value) -> ExtensionResult<Vec<(Document, f64)>> {
+fn decode_response(value: Value, limit: usize) -> ExtensionResult<Vec<(Document, f64)>> {
     if value.get("timed_out").and_then(Value::as_bool) == Some(true)
         || value
             .pointer("/_shards/failed")
@@ -173,27 +167,31 @@ fn decode_response(value: Value) -> ExtensionResult<Vec<(Document, f64)>> {
     {
         return Err(invalid("OpenSearch returned incomplete results"));
     }
-    value
+    let hits = value
         .pointer("/hits/hits")
         .and_then(Value::as_array)
-        .ok_or_else(|| invalid("OpenSearch response missing hits.hits"))?
-        .iter()
-        .map(decode_hit)
-        .collect()
+        .ok_or_else(|| invalid("OpenSearch response missing hits.hits"))?;
+    if hits.len() > limit {
+        return Err(invalid(format!(
+            "OpenSearch returned more hits than requested ({} > {limit})",
+            hits.len()
+        )));
+    }
+    hits.iter().map(decode_hit).collect()
 }
 
 fn fetch(state: &SearchState, ctx: &mut StageContext) -> ExtensionResult<Vec<(Document, f64)>> {
     let body = opensearch_body(&state.args);
     let mut errors = Vec::new();
     for endpoint in &state.config.endpoints {
-        ctx.check_interrupt()?;
+        let timeout = crate::next_attempt_timeout(ctx, crate::default_timeout())?;
         let url = format!(
             "{}/{}/_search?allow_partial_search_results=false",
             endpoint.trim_end_matches('/'),
             state.index
         );
-        match crate::transport::post_search(&url, &body, Duration::from_secs(2)) {
-            Ok(response) => return decode_response(response),
+        match crate::transport::post_search(&url, &body, timeout) {
+            Ok(response) => return decode_response(response, state.args.limit as usize),
             Err(e) => errors.push(format!("{endpoint}: {e}")),
         }
     }
@@ -274,6 +272,7 @@ pub unsafe extern "C" fn get_mongodb_extension(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::Duration;
 
     fn hit(key: Document) -> Value {
         json!({"_id": serde_json::to_string(&Bson::Document(key).into_canonical_extjson()).unwrap(), "_score": 0.75})
@@ -440,12 +439,22 @@ mod tests {
             json!({"hits": {"hits": [hit(doc! {"_id": 1}), {"_id": "bad", "_score": 1}]}}),
             json!({"hits": {}}),
         ] {
-            assert!(decode_response(response).is_err());
+            assert!(decode_response(response, 10).is_err());
         }
         assert_eq!(
-            decode_response(json!({"hits": {"hits": []}})).unwrap(),
+            decode_response(json!({"hits": {"hits": []}}), 10).unwrap(),
             Vec::new()
         );
+    }
+
+    #[test]
+    fn rejects_more_hits_than_requested_limit() {
+        let response = json!({"hits": {"hits": [hit(doc! {"_id": 1}), hit(doc! {"_id": 2})]}});
+        assert_eq!(decode_response(response.clone(), 2).unwrap().len(), 2);
+        assert!(decode_response(response, 1)
+            .unwrap_err()
+            .to_string()
+            .contains("more hits than requested"));
     }
 
     #[test]
