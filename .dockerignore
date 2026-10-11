@@ -4,3 +4,10 @@ target
 .idea
 .vscode
 reports
+**/.terraform
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfplan
+**/*.tfvars
+**/*.tfvars.json
+**/__pycache__

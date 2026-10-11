@@ -2,3 +2,9 @@
 **/*.rs.bk
 /reports/
 **/__pycache__/
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfplan
+/examples/aws-opensearch/terraform/*.tfvars
+/examples/aws-opensearch/terraform/*.tfvars.json

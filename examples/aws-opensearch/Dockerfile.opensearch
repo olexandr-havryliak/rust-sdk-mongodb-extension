@@ -1,0 +1,3 @@
+FROM opensearchproject/opensearch:2.19.6
+# Floci does not forward a domain's heap configuration to its Docker container.
+ENV OPENSEARCH_JAVA_OPTS="-Xms2g -Xmx2g" DISABLE_INSTALL_DEMO_CONFIG=true

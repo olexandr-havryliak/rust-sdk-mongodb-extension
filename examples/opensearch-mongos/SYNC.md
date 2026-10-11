@@ -4,10 +4,17 @@ See [README](README.md) for commands and [Architecture](ARCHITECTURE.md) for dia
 
 ## Standard connectors only
 
-No custom consumer, indexer, connector, or SMT runs in this example. The shared
-[Kafka Connect Dockerfile](../opensearch/Dockerfile.connect) installs the MongoDB
-Kafka source connector and Aiven OpenSearch sink connector (3.2.0). Source
+No custom consumer, indexer, connector, or SMT runs in this example. The local
+[Kafka Connect Dockerfile](Dockerfile.connect) installs the MongoDB
+Kafka source connector and Aiven OpenSearch sink connector (4.1.0), using
+Confluent Kafka Connect 8.0.8 with Java 21. The broker remains on 7.8.0;
+AWS SigV4 is supported by the sink but not enabled for the local demo. Source
 connectors connect to **mongos**, never directly to a shard.
+
+OpenSearch and Dashboards use **2.19.6**, including the upstream HTTP compression
+fix for clients advertising Zstd. This example owns its HTTP regression tests;
+compression is not disabled as a workaround. The MiniLM model,
+384-dimensional mappings, and JVM heap settings are unchanged.
 
 Source configurations are explicit per namespace and shard-key definition:
 
@@ -17,6 +24,7 @@ Source configurations are explicit per namespace and shard-key definition:
 | `search_demo.hashed` | `{tenant: "hashed"}` | [hashed source](config/mongo-hashed-source.json) |
 | `search_demo.compound` | `{"location.region": 1, tenant: 1}` | [compound source](config/mongo-compound-source.json) |
 | `search_demo.unsharded` | None; key is only `_id` | [unsharded source](config/mongo-unsharded-source.json) |
+| `search_demo.products` | `{_id: "hashed"}`; key is only the original `_id` | [products source](config/mongo-products-source.json) |
 
 `startup.mode=copy_existing` starts initial copy and then streams subsequent
 changes. `change.stream.full.document=updateLookup` supplies complete documents
@@ -41,6 +49,11 @@ document by `_id` alone. Its source pipeline keeps exactly that field; do not
 reuse a sharded namespace's configuration and add artificial shard-key fields.
 The same sink, template, ingest pipeline, and mongos extension handle these keys
 without special code or a separate extension.
+
+For `products`, the shard key is already `_id`. Initial copy, live writes and
+deletes therefore normalize to that single field too, not a duplicated field
+or MongoDB's internal hash. The local outdoor-products dataset exercises this
+case on both shards while using the same vector mapping and sink projection.
 
 The source pipeline changes only `documentKey`. It never manufactures a
 `fullDocument` for delete events, which would suppress tombstones and leave

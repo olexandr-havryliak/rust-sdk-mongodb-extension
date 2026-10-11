@@ -10,9 +10,11 @@ members = [
     "examples/fibonacci/fibonacci-extension",
     "examples/http-fetch/http-fetch-extension",
     "examples/data-federation/data-federation-extension",
-    "examples/opensearch/extension-core",
+    "opensearch-extension-core",
     "examples/opensearch/extension",
     "examples/opensearch-mongos/extension",
+    "examples/aws-opensearch/extensions/replica-set",
+    "examples/aws-opensearch/extensions/mongos",
 ]
 
 [workspace.package]

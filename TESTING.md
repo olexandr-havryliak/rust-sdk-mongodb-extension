@@ -24,6 +24,11 @@ The e2e wrapper removes the MongoDB stack and its volumes after the smoke/fuzz
 checks, including on failure. Miri is slow and runs last.
 Nothing is installed on the host.
 
+The unit-test workflow also checks that examples do not reference sibling
+examples, that their documentation links resolve, and that the OpenSearch core
+lives outside the examples. These checks run from
+`.github/testing/tests/test_examples.py`.
+
 To reuse the already-built testing image:
 
 ```bash

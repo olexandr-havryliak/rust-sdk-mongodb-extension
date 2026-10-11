@@ -8,7 +8,12 @@ connector removal is not data removal or an offset reset.
 
 ## Processing
 
-The ready-made Aiven OpenSearch Sink **3.2.0** replaces the custom Python indexer.
+The ready-made Aiven OpenSearch Sink **4.1.0** replaces the custom Python indexer.
+This example builds its own Confluent Kafka Connect **8.0.8** image with
+**Java 21**, required by connector 4.x. The Kafka broker remains on **7.8.0**.
+The connector supports AWS SigV4, but signing is not enabled in the local demos.
+Connector configurations use the 4.x class name
+`io.aiven.kafka.connect.opensearch.OpenSearchSinkConnector`.
 It runs as a Kafka Connect task, decodes JSON, applies the configured field/key
 SMTs, and writes documents using MongoDB's string `_id`.
 
@@ -86,6 +91,6 @@ recovery. It is a restart test, not a multi-worker failover certification.
 For a disposable rebuild, remove the complete stand with the README cleanup
 command and restart. Never reset a production stream based on this demo test.
 
-Primary references: [Aiven connector source](https://github.com/Aiven-Open/opensearch-connector-for-apache-kafka/tree/v3.2.0),
+Primary references: [Aiven connector source](https://github.com/Aiven-Open/opensearch-connector-for-apache-kafka/tree/v4.1.0),
 [Kafka Connect offset management](https://kafka.apache.org/36/kafka-connect/user-guide/),
 and [OpenSearch delete version retention](https://docs.opensearch.org/latest/api-reference/document-apis/delete-document/).

@@ -5,6 +5,10 @@ use bson::{doc, Bson, Document};
 use extension_sdk_mongodb::{ExtensionError, ExtensionResult, Next, StageContext};
 use serde_json::{json, Value};
 
+pub mod mongodb;
+pub mod mongos;
+pub mod transport;
+
 const DEFAULT_LIMIT: i64 = 10;
 const MAX_LIMIT: i64 = 1000;
 const DEFAULT_TIMEOUT_MS: u64 = 2_000;
@@ -234,13 +238,8 @@ fn fetch_candidates_from_endpoint(
     score_key: &str,
     timeout: Duration,
 ) -> Result<Vec<Document>, String> {
-    let agent = ureq::AgentBuilder::new().timeout(timeout).build();
     let url = format!("{}/{}/_search", endpoint.trim_end_matches('/'), index);
-    let response = agent
-        .post(&url)
-        .send_json(body.clone())
-        .map_err(|e| e.to_string())?;
-    let value: Value = response.into_json().map_err(|e| e.to_string())?;
+    let value = transport::post_search(&url, body, timeout)?;
     let hits = value
         .pointer("/hits/hits")
         .and_then(Value::as_array)
@@ -270,6 +269,71 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(cfg.endpoints, vec!["http://opensearch:9200"]);
+    }
+
+    #[test]
+    fn search_does_not_follow_redirects_to_another_endpoint() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+        };
+        let first = TcpListener::bind("127.0.0.1:0").unwrap();
+        let target = TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", first.local_addr().unwrap());
+        let redirect = format!("http://{}/other", target.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = first.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                headers.push(byte[0]);
+            }
+            let length = std::str::from_utf8(&headers)
+                .unwrap()
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap();
+            stream.read_exact(&mut vec![0; length]).unwrap();
+            write!(stream, "HTTP/1.1 307 Temporary Redirect\r\nLocation: {redirect}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(1);
+            while std::time::Instant::now() < deadline {
+                if let Ok((mut redirected, _)) = target.accept() {
+                    let body = r#"{"hits":{"hits":[]}}"#;
+                    write!(
+                        redirected,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .unwrap();
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            false
+        });
+        let result = fetch_candidates_from_endpoint(
+            &url,
+            "mongodb.demo.items",
+            &json!({}),
+            "$vectorSearchScore",
+            Duration::from_secs(2),
+        );
+        let followed = server.join().unwrap();
+        assert!(result.is_err(), "redirect must not be accepted");
+        assert!(
+            !followed,
+            "authorization must not be sent to the redirect target"
+        );
     }
 
     #[test]
@@ -388,17 +452,13 @@ mod tests {
     #[test]
     fn expansion_preserves_vector_filter() {
         let filter = doc! { "ids": { "values": ["demo-shell"] } };
-        for (name, args) in [(
-            "$vectorSearch",
-            parse_vector_search_args(
-                doc! { "path": "description", "query": "winter", "filter": &filter },
-            )
-            .unwrap(),
-        )] {
-            let stages = id_lookup_expansion(name, &args).stage_documents();
-            let expanded = stages[0].get_document(name).unwrap();
-            assert_eq!(expanded.get_document("filter").unwrap(), &filter);
-        }
+        let args = parse_vector_search_args(
+            doc! { "path": "description", "query": "winter", "filter": &filter },
+        )
+        .unwrap();
+        let stages = id_lookup_expansion("$vectorSearch", &args).stage_documents();
+        let expanded = stages[0].get_document("$vectorSearch").unwrap();
+        assert_eq!(expanded.get_document("filter").unwrap(), &filter);
     }
 
     #[test]

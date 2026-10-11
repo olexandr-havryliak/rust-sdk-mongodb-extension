@@ -1,0 +1,5 @@
+{
+  "request_processors": [
+    {"neural_query_enricher": {"default_model_id": "${MODEL_ID}"}}
+  ]
+}

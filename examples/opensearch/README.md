@@ -4,10 +4,13 @@
 
 Run commands from the repository root. Only Docker is required; MongoDB clients,
 connectors, ML inference, and tests all run in containers.
+OpenSearch and Dashboards use 2.19.6; Kafka Connect uses 8.0.8 / Java 21 with
+Aiven OpenSearch Sink 4.1.0. The Kafka broker remains on 7.8.0.
 The demo mongod uses `--wiredTigerCacheSizeGB 0.25` (256 MiB of internal cache,
 not a total process-memory limit). JVM heap settings are unchanged. Run this
-and the [mongos demo](../opensearch-mongos/README.md) separately, stopping one
-stack before starting the other.
+and other demos separately, stopping one stack before starting another.
+All deployment files belong to this example. Only the SDK and
+[OpenSearch core](../../opensearch-extension-core/README.md) are shared.
 
 For an older disposable demo that indexed `name`, use the cleanup command in
 section 8 before starting this version. Changing field projection alone does

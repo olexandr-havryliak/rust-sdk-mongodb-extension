@@ -9,7 +9,7 @@ WORKDIR /build
 COPY Cargo.lock ./
 COPY extension-sys-mongodb ./extension-sys-mongodb
 COPY extension-sdk-mongodb ./extension-sdk-mongodb
-COPY examples/opensearch/extension-core ./examples/opensearch/extension-core
+COPY opensearch-extension-core ./opensearch-extension-core
 COPY examples/opensearch/extension ./examples/opensearch/extension
 RUN <<'EOF' cat > Cargo.toml
 [workspace]
@@ -17,7 +17,7 @@ resolver = "2"
 members = [
     "extension-sys-mongodb",
     "extension-sdk-mongodb",
-    "examples/opensearch/extension-core",
+    "opensearch-extension-core",
     "examples/opensearch/extension",
 ]
 

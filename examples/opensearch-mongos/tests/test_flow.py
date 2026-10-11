@@ -290,6 +290,81 @@ class ShardedFlowTests(unittest.TestCase):
         finally:
             coll.update_one(key, {"$set": {"title": original}})
 
+    def test_11_products_initial_copy_and_id_hashed_distribution(self):
+        dataset = json.loads(Path("/datasets/outdoor-products.json").read_text())
+        coll = MONGO.search_demo.products
+        catalog = MONGO.config.collections.find_one({"_id": coll.full_name})
+        self.assertIsNotNone(catalog)
+        self.assertEqual(catalog["key"], {"_id": "hashed"})
+        self.assertEqual(coll.count_documents({}), len(dataset))
+        counts = []
+        for shard in ("shard0", "shard1"):
+            with MongoClient(f"mongodb://{shard}:27017/?directConnection=true") as direct:
+                counts.append(direct.search_demo.products.count_documents({}))
+        self.assertTrue(all(count > 0 for count in counts), counts)
+        self.assertEqual(sum(counts), len(dataset))
+        rows = eventually(lambda: hits("products") if len(hits("products")) == len(dataset) else None)
+        self.assertEqual({decoded_key(hit)["_id"] for hit in rows}, {doc["_id"] for doc in dataset})
+        for doc in dataset:
+            self.assertEqual(coll.find_one({"_id": doc["_id"]}), doc)
+        for hit in rows:
+            self.assertEqual(list(decoded_key(hit)), ["_id"])
+            source = hit["_source"]
+            self.assertEqual(set(source), {"description_embedding", "__mongodb"})
+            self.assertEqual(len(source["description_embedding"]), 384)
+            self.assertEqual(source["__mongodb"]["documentKey"], hit["_id"])
+
+    def test_12_products_crud_keeps_id_only_identity(self):
+        coll = MONGO.search_demo.products
+        key = {"_id": "live-products"}
+        try:
+            coll.insert_one({**key, "title": "Not indexed", "description": "Waterproof hiking jacket"})
+            hit = eventually(lambda: candidate_hit("products", key))
+            record_id = hit["_id"]
+            self.assertEqual(decoded_key(hit), key)
+            vector = hit["_source"]["description_embedding"]
+            coll.update_one(key, {"$set": {"description": "Lightweight summer camping tent"}})
+            eventually(lambda: candidate_hit("products", key)["_source"]["description_embedding"] != vector)
+            self.assertEqual(candidate_hit("products", key)["_id"], record_id)
+            vector = candidate_hit("products", key)["_source"]["description_embedding"]
+            coll.replace_one(key, {**key, "title": "Replacement", "description": "Insulated winter sleeping bag"})
+            eventually(lambda: candidate_hit("products", key)["_source"]["description_embedding"] != vector)
+            hit = candidate_hit("products", key)
+            self.assertEqual(hit["_id"], record_id)
+            self.assertEqual(hit["_source"]["__mongodb"]["documentKey"], record_id)
+            self.assertEqual(sum(decoded_key(hit) == key for hit in hits("products")), 1)
+        finally:
+            coll.delete_one(key)
+        eventually(lambda: candidate_hit("products", key) is None)
+
+    def test_13_products_vector_search_matches_opensearch_and_current_mongo(self):
+        coll = MONGO.search_demo.products
+        query = "waterproof hiking jacket"
+        body = {"size": 5, "_source": False,
+                "query": {"neural": {"description_embedding": {"query_text": query, "k": 5}}}}
+        candidates = api("POST", "/mongodb.search_demo.products/_search?allow_partial_search_results=false", body)["hits"]["hits"]
+        stage = {"$vectorSearch": {"path": "description", "query": query, "limit": 5}}
+        rows = list(coll.aggregate([stage, {"$set": {"score": {"$meta": "vectorSearchScore"}}}]))
+        self.assertEqual(len(rows), 5)
+        self.assertEqual([row["_id"] for row in rows], [decoded_key(hit)["_id"] for hit in candidates])
+        for row, hit in zip(rows, candidates):
+            score = row.pop("score")
+            self.assertAlmostEqual(score, hit["_score"], places=6)
+            self.assertEqual(row, coll.find_one({"_id": row["_id"]}))
+        key = {"_id": rows[0]["_id"]}
+        original = coll.find_one(key)["title"]
+        try:
+            coll.update_one(key, {"$set": {"title": "Fresh Mongo-only product title"}})
+            current = list(coll.aggregate([stage]))
+            self.assertEqual(next(row for row in current if row["_id"] == key["_id"])["title"],
+                             "Fresh Mongo-only product title")
+        finally:
+            coll.update_one(key, {"$set": {"title": original}})
+
+    def test_14_dashboards_is_available(self):
+        status = eventually(lambda: api("GET", "/api/status", base="http://opensearch-dashboards:5601"))
+        self.assertEqual(status["status"]["overall"]["state"], "green")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

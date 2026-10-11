@@ -12,6 +12,9 @@ for (const name of ["shard0", "shard1"]) {
   }
 }
 command({enableSharding: "search_demo", primaryShard: "shard0"});
+if (!db.getSiblingDB("config").collections.findOne({_id: "search_demo.products", dropped: {$ne: true}})) {
+  command({shardCollection: "search_demo.products", key: {_id: "hashed"}, numInitialChunks: 2});
+}
 for (const [name, key] of [["range", {tenant: 1}], ["hashed", {tenant: "hashed"}],
                          ["compound", {"location.region": 1, tenant: 1}]]) {
   const catalog = db.getSiblingDB("config");

@@ -128,6 +128,6 @@ Edit files under **`examples/data-federation/fixtures/`** on the host; the conta
 ## Tests
 
 - **Unit tests:** `cargo test -p data_federation_extension` — includes **`stage_extension_parameters`** (BSON **`path`** / **`maxDocuments`**) and **`extension_options_parameters`** (JSON and YAML **`allowedRoot`**, **`allowSymlinks`**, **`maxLineBytes`**, **`maxDocumentBytes`**, defaults, invalid UTF-8), plus path rules, JSONL parsing, and line limits.
-- **E2E:** `./e2e-tests/run-e2e.sh` runs [`../e2e-tests/scripts/data_federation_e2e.js`](../e2e-tests/scripts/data_federation_e2e.js) against the shared stack (varied **`path`** / **`maxDocuments`** and downstream **`$match`**).
+- **E2E:** `bash examples/data-federation/run-demo.sh` builds this example's image, runs [`scripts/demo.js`](scripts/demo.js) in its own MongoDB container, and removes the containers and volumes afterward.
 
 Implementation: [`data-federation-extension/`](data-federation-extension/) (`cdylib`).

@@ -1,0 +1,17 @@
+[package]
+name = "opensearch_extension_core"
+version.workspace = true
+edition.workspace = true
+description = "Shared OpenSearch transport and topology-specific stages for Rust SDK for MongoDB Extensions"
+license.workspace = true
+
+[dependencies]
+bson = "2.15"
+extension-sdk-mongodb = { path = "../extension-sdk-mongodb" }
+serde_json = "1"
+ureq = { version = "2.12", default-features = false, features = ["json", "tls"] }
+aws-credential-types = "1"
+aws-sigv4 = { version = "1", default-features = false, features = ["sign-http", "http1"] }
+
+[lints.rust]
+unsafe_code = "allow"

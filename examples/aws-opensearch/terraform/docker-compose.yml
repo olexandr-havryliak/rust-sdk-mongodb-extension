@@ -1,0 +1,24 @@
+name: aws-opensearch-terraform
+services:
+  terraform:
+    image: hashicorp/terraform:1.9.8
+    working_dir: /work
+    entrypoint: ["sh", "/work/entrypoint.sh"]
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    cpus: 2
+    network_mode: bridge
+    volumes: [".:/work"]
+    environment:
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_SESSION_TOKEN
+      - AWS_DEFAULT_REGION
+      - TF_VAR_aws_region
+      - TF_VAR_bedrock_region
+      - TF_VAR_client_principal_arn
+      - TF_VAR_domain_name
+      - TF_VAR_instance_type
+      - TF_VAR_instance_count
+      - TF_VAR_volume_size
+      - TF_IN_AUTOMATION=true
+      - TF_INPUT=false

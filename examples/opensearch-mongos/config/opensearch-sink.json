@@ -1,7 +1,7 @@
 {
-  "connector.class": "io.aiven.kafka.connect.opensearch.OpensearchSinkConnector",
+  "connector.class": "io.aiven.kafka.connect.opensearch.OpenSearchSinkConnector",
   "tasks.max": "1",
-  "topics": "mongodb.search_demo.range,mongodb.search_demo.hashed,mongodb.search_demo.compound,mongodb.search_demo.unsharded",
+  "topics": "mongodb.search_demo.range,mongodb.search_demo.hashed,mongodb.search_demo.compound,mongodb.search_demo.unsharded,mongodb.search_demo.products",
   "connection.url": "http://opensearch:9200",
   "key.ignore": "false",
   "schema.ignore": "true",

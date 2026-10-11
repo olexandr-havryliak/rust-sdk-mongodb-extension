@@ -1,0 +1,31 @@
+{
+  "index_patterns": ["mongodb.*"],
+  "priority": 100,
+  "template": {
+    "settings": {
+      "index.knn": true,
+      "index.number_of_shards": 1,
+      "index.number_of_replicas": 0,
+      "index.default_pipeline": "mongodb-auto-embed",
+      "index.search.default_pipeline": "mongodb-default-model"
+    },
+    "mappings": {
+      "dynamic_templates": [
+        {
+          "embeddings": {
+            "match": "*_embedding",
+            "mapping": {
+              "type": "knn_vector",
+              "dimension": 384,
+              "method": {
+                "name": "hnsw",
+                "engine": "lucene",
+                "space_type": "cosinesimil"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

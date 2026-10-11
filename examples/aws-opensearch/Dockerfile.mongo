@@ -1,0 +1,33 @@
+# syntax=docker/dockerfile:1
+ARG MONGO_IMAGE=mongodb/mongodb-community-server:9.0-ubi9
+FROM rust:bookworm AS builder
+ENV CARGO_BUILD_JOBS=2
+WORKDIR /build
+COPY Cargo.lock ./
+COPY extension-sys-mongodb ./extension-sys-mongodb
+COPY extension-sdk-mongodb ./extension-sdk-mongodb
+COPY opensearch-extension-core ./opensearch-extension-core
+COPY examples/aws-opensearch/extensions ./examples/aws-opensearch/extensions
+RUN <<'EOF' cat > Cargo.toml
+[workspace]
+resolver = "2"
+members = ["extension-sys-mongodb", "extension-sdk-mongodb", "opensearch-extension-core", "examples/aws-opensearch/extensions/replica-set", "examples/aws-opensearch/extensions/mongos"]
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+EOF
+RUN cargo build -p aws_opensearch_extension -p aws_opensearch_mongos_extension --release
+FROM ${MONGO_IMAGE} AS base
+USER root
+RUN mkdir -p /etc/mongo/extensions /usr/local/lib/mongo-extensions
+RUN mkdir -p /data/db /data/configdb \
+    && chown -R 999:999 /data/db /data/configdb
+FROM base AS replica-set
+COPY --from=builder /build/target/release/libaws_opensearch_extension.so /usr/local/lib/mongo-extensions/
+USER 999
+CMD ["mongod"]
+FROM base AS mongos
+COPY --from=builder /build/target/release/libaws_opensearch_mongos_extension.so /usr/local/lib/mongo-extensions/
+USER 999
+ENTRYPOINT ["mongos"]

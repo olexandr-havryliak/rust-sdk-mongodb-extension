@@ -1,0 +1,21 @@
+{
+  "connector.class": "com.mongodb.kafka.connect.MongoSourceConnector",
+  "tasks.max": "1",
+  "connection.uri": "mongodb://mongos:27017",
+  "database": "search_demo",
+  "collection": "unsharded",
+  "topic.namespace.map": "{\"search_demo.unsharded\":\"mongodb.search_demo.unsharded\"}",
+  "startup.mode": "copy_existing",
+  "startup.mode.copy.existing.namespace.regex": "search_demo\\.unsharded",
+  "startup.mode.copy.existing.allow.disk.use": "true",
+  "publish.full.document.only": "true",
+  "publish.full.document.only.tombstone.on.delete": "true",
+  "change.stream.full.document": "updateLookup",
+  "change.stream.document.key.as.key": "true",
+  "output.format.key": "json",
+  "output.format.value": "json",
+  "output.json.formatter": "com.mongodb.kafka.connect.source.json.formatter.ExtendedJson",
+  "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+  "value.converter": "org.apache.kafka.connect.storage.StringConverter",
+  "pipeline": "[{\"$set\":{\"documentKey\":{\"_id\":\"$documentKey._id\"}}}]"
+}

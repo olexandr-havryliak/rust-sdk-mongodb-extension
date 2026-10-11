@@ -9,6 +9,12 @@ router-only `$vectorSearch` extension with standard Kafka synchronization and
 full document keys on a two-shard cluster. It is separate from the
 [replica-set example](examples/opensearch/README.md).
 
+The [AWS OpenSearch example](examples/aws-opensearch/README.md) supports both
+topologies with a real OpenSearch domain managed locally by Floci, remote
+autoembeddings, and optional HTTPS/SigV4 transport. Its
+[AWS setup guide](examples/aws-opensearch/AWS.md) describes a provisioned domain
+with Bedrock Titan V2; real AWS execution is not yet verified.
+
 **MongoDB Extensions ABI:** this tree targets the vendored C API **version 1.0** (`MONGODB_EXTENSION_API_MAJOR_VERSION` **1**, `MONGODB_EXTENSION_API_MINOR_VERSION` **0** in [`include/mongodb_extension_api.h`](include/mongodb_extension_api.h)). Extensions built with the SDK export `get_mongodb_extension_versions` to advertise that pair, then accept the host-selected version in `get_mongodb_extension` (see [`extension-sdk-mongodb/src/version.rs`](extension-sdk-mongodb/src/version.rs)).
 
 **Host safety contract:** MongoDB guarantees that `HostServices` remains valid for

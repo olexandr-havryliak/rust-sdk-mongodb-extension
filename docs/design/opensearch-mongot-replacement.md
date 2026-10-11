@@ -11,7 +11,10 @@ the implementation documentation linked below.
 - MongoDB remains the document source of truth; no MongoDB search/vector index
   or search-specific collection metadata is created.
 - MongoDB Kafka Source uses `startup.mode=copy_existing` and change streams.
-- Aiven OpenSearch Sink 3.2.0 handles synchronization without a custom consumer.
+- Aiven OpenSearch Sink 4.1.0 handles synchronization without a custom consumer.
+  Both examples use Kafka Connect 8.0.8 with Java 21; the broker remains on 7.8.0.
+- OpenSearch and Dashboards use 2.19.6, including the upstream Zstd HTTP response
+  fix required by the connector's new HTTP client. Compression remains enabled.
 - Kafka sink SMT configuration selects only flat, non-empty text fields to
   vectorize. Projection happens before OpenSearch receives the document;
   Kafka still retains the full MongoDB source payload.
