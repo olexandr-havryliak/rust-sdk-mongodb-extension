@@ -42,6 +42,16 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(action["with"]["check"], check)
                 self.assertIn(f'run-docker.sh" {check}', (ROOT / f".github/testing/{check}.sh").read_text())
 
+    def test_markdown_only_changes_skip_all_workflows_except_doc_contracts(self):
+        for path in (ROOT / ".github/workflows").glob("*.yml"):
+            triggers = load(path)["on"]
+            for event in ("push", "pull_request"):
+                with self.subTest(workflow=path.stem, event=event):
+                    if path.stem == "tests":
+                        self.assertNotIn("paths-ignore", triggers[event])
+                    else:
+                        self.assertEqual(triggers[event]["paths-ignore"], ["**/*.md"])
+
     def test_ready_junit_publisher_is_read_only_and_runs_after_failure(self):
         action = load(ROOT / ".github/actions/run-check/action.yml")
         steps = {step["id"]: step for step in action["runs"]["steps"]}

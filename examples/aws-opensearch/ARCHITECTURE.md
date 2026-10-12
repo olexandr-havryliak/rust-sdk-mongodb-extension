@@ -2,6 +2,8 @@
 
 Commands: [README.md](README.md). AWS permissions: [AWS.md](AWS.md).
 Optional domain/IAM provisioning: [Terraform HOWTO](terraform/README.md).
+The SDK host contract is in the [repository architecture](../../ARCHITECTURE.md);
+why this extension exists is in the [repository README](../../README.md).
 
 ## Synchronization
 

@@ -41,3 +41,10 @@ Run workspace tests from the repository root, without a local Rust toolchain:
 ```
 
 See [TESTING.md](../TESTING.md) for the remaining SDK checks.
+Repository overview: [README](../README.md). Host lifecycle and stage contracts:
+[ARCHITECTURE.md](../ARCHITECTURE.md). Example index:
+[examples/README.md](../examples/README.md). OpenSearch stands:
+[replica set](../examples/opensearch/README.md),
+[mongos](../examples/opensearch-mongos/README.md),
+[AWS](../examples/aws-opensearch/README.md).
+Design notes: [opensearch-mongot-replacement.md](../docs/design/opensearch-mongot-replacement.md).

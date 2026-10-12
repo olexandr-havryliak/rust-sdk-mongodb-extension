@@ -2,6 +2,8 @@
 
 Proof-of-concept **SourceStage** that streams **JSON Lines** (JSONL) from the **MongoDB server host** filesystem into an aggregation pipeline. Paths in the stage document are **relative** and are always resolved under an **`allowedRoot`** directory supplied only via **extension configuration** (never from the client query alone). This is **not** MongoDB Data Federation; it shows how extensions can expose external file-backed sources.
 
+SDK overview: [README](../../README.md). Stage contracts: [ARCHITECTURE.md](../../ARCHITECTURE.md). Example index: [examples/README.md](../README.md).
+
 ## What this demo shows
 
 - **`$readLocalJsonl`** with **[`SourceStage`](../../extension-sdk-mongodb/src/source_stage.rs)** / **[`export_source_stage!`](../../extension-sdk-mongodb/src/lib.rs)**.

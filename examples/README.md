@@ -1,6 +1,6 @@
 # Example extensions
 
-This directory holds **self-contained demos**: each example is a workspace member `cdylib` plus Docker assets and a `run-demo.sh` wrapper. They show how to use the **Rust SDK for MongoDB Extensions** against a real **MongoDB 9.0** image with the Extensions API enabled—not the SDK API reference (see the [repository root README](../README.md)).
+This directory holds **self-contained demos**: each example is a workspace member `cdylib` plus Docker assets and a `run-demo.sh` wrapper. They show how to use the **Rust SDK for MongoDB Extensions** against a real **MongoDB 9.0** image with the Extensions API enabled. The [repository README](../README.md) explains why the SDK exists and why the OpenSearch `$vectorSearch` extension is the main example. Host lifecycle, stage kinds, and the ABI contract are in [ARCHITECTURE.md](../ARCHITECTURE.md).
 
 All MongoDB example images default to **`mongodb/mongodb-community-server:9.0-ubi9`**.
 Dockerfiles or setup scripts supply extension manifests under

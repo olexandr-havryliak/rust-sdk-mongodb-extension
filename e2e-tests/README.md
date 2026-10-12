@@ -7,6 +7,10 @@ The Docker e2e image is intentionally focused on the current OpenSearch-backed
 Data federation remain in the repository as examples, but are not loaded into
 this image.
 
+SDK purpose and the OpenSearch examples: [README](../README.md). Host lifecycle
+and stage contracts: [ARCHITECTURE.md](../ARCHITECTURE.md). How to run every
+check: [TESTING.md](../TESTING.md).
+
 ---
 
 ## Prerequisites

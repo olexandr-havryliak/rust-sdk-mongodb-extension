@@ -2,6 +2,9 @@
 
 All checks for the **Rust SDK for MongoDB Extensions** run in Docker.
 Only Docker with Compose and Bash are needed on the host.
+The [repository README](README.md) describes why the SDK exists and the
+OpenSearch examples. Stage and ABI contracts are in
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Run Everything Locally
 

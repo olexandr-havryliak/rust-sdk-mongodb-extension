@@ -134,6 +134,8 @@ Test resources are isolated and cleaned up; they do not certify production HA.
 
 ## Implementation Documentation
 
+- [Repository README](../../README.md): why the SDK exists and how this design uses it.
+- [SDK architecture](../../ARCHITECTURE.md): host lifecycle, stage kinds, and the ABI contract.
 - [README](../../examples/opensearch/README.md): complete runnable demo and tests.
 - [Architecture](../../examples/opensearch/ARCHITECTURE.md): components, automatic
   mappings, deployed model, default-query-model setup, and separate vertical

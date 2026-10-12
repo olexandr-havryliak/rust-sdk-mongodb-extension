@@ -1,6 +1,8 @@
 # Architecture
 
 See [README](README.md) for runnable commands and [SYNC](SYNC.md) for connectors.
+The SDK host contract is in the [repository architecture](../../ARCHITECTURE.md);
+why this extension exists is in the [repository README](../../README.md).
 
 ## Synchronization
 

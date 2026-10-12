@@ -2,6 +2,8 @@
 
 Create and delete infrastructure for the **Rust SDK for MongoDB Extensions**
 [AWS OpenSearch example](../README.md). Run commands from the repository root.
+SDK overview: [README](../../../README.md). Stage contracts:
+[ARCHITECTURE.md](../../../ARCHITECTURE.md).
 Only Docker is required locally; no Terraform or AWS CLI installation is needed.
 
 ## 1. Export Credentials And Settings
