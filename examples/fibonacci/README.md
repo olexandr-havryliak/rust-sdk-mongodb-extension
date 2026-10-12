@@ -2,6 +2,8 @@
 
 Aggregation extension that implements **`$fibonacci: { n: <count> }`**: it streams documents **`{ i, value }`** along the Fibonacci sequence for indices `0 .. n` (with **`n`** capped at 10 000). Runs against **MongoDB 9.0** in Docker.
 
+SDK overview: [README](../../README.md). Stage contracts: [ARCHITECTURE.md](../../ARCHITECTURE.md). Example index: [examples/README.md](../README.md).
+
 ## What this demo shows
 
 - How to implement a **source / generator** stage with **[`SourceStage`](../../extension-sdk-mongodb/src/source_stage.rs)** and **[`export_source_stage!`](../../extension-sdk-mongodb/src/lib.rs)**.

@@ -2,6 +2,8 @@
 
 Aggregation extension that implements **`$httpFetch`**: a blocking **HTTP GET** (similar to **`curl`**) for a **`url`** in the stage document. It returns **one document** when the pipeline reaches **EOF with zero upstream rows** (empty collection, **`$limit: 0`**, or an impossible **`$match`**). Runs against **MongoDB 9.0** in Docker.
 
+SDK overview: [README](../../README.md). Stage contracts: [ARCHITECTURE.md](../../ARCHITECTURE.md). Example index: [examples/README.md](../README.md).
+
 ## What this demo shows
 
 - How to use **`export_map_transform_stage!`** with an **EOF-with-no-rows** handler so the stage emits a single synthetic document after upstream exhaustion.

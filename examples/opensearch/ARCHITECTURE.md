@@ -2,6 +2,8 @@
 
 See [README.md](README.md) for commands, [SYNC.md](SYNC.md) for configurations,
 and [CONNECTOR.md](CONNECTOR.md) for ordering and recovery limits.
+The SDK host contract is in the [repository architecture](../../ARCHITECTURE.md);
+why this extension exists is in the [repository README](../../README.md).
 
 ## Components
 

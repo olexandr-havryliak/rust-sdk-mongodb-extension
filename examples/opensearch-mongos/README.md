@@ -183,3 +183,5 @@ state; the next `up` creates a fresh demo.
 
 See [Architecture](ARCHITECTURE.md) and [Synchronization](SYNC.md) for implementation
 details, model setup, connector configuration, and ordering/HA boundaries.
+SDK overview: [repository README](../../README.md). Stage contracts:
+[SDK architecture](../../ARCHITECTURE.md). Example index: [examples/README.md](../README.md).

@@ -81,5 +81,7 @@ use a separate extension, leaving the replica-set extension separate. Other
 out-of-scope cases include views, transactions, authentication, and production
 HA; this PoC uses single-node replica sets.
 
-See the [test overview](../README.md) and
+See the [test overview](../README.md), the
+[repository README](../../README.md), and the
+[SDK architecture](../../ARCHITECTURE.md). The stage under test is the
 [test extension](../router-lookup-extension/src/lib.rs).

@@ -169,6 +169,9 @@ that their OpenSearch indices survive connector deletion without further writes.
 
 ## Further Reading
 
+- [Repository README](../../README.md): why the SDK exists and how this example fits.
+- [SDK architecture](../../ARCHITECTURE.md): host lifecycle, stage kinds, and the ABI contract.
+- [Example index](../README.md): ports and the other demos.
 - [ARCHITECTURE.md](ARCHITECTURE.md): data/query flow, embedding model, mappings, and defaults.
 - [SYNC.md](SYNC.md): connector configurations and changing selected fields.
 - [CONNECTOR.md](CONNECTOR.md): sink processing, ordering, recovery, and HA limits.

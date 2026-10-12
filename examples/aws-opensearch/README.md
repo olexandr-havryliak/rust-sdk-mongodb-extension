@@ -136,6 +136,9 @@ or Bedrock availability. General SDK checks: [TESTING.md](../../TESTING.md).
 
 ## Details
 
+- [Repository README](../../README.md): why the SDK exists and how this example fits
+- [SDK architecture](../../ARCHITECTURE.md): host lifecycle, stage kinds, and the ABI contract
+- [Example index](../README.md)
 - [Architecture and automatic setup](ARCHITECTURE.md)
 - [Real AWS domain and Bedrock setup](AWS.md)
 - [Terraform creation/deletion and Docker-only HOWTO](terraform/README.md)

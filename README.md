@@ -1,205 +1,92 @@
 # Rust SDK for MongoDB Extensions
 
-Rust workspace that ships **`extension-sdk-mongodb`**, the **Rust SDK for MongoDB Extensions**: libraries and macros for building **MongoDB server extensions**—`cdylib` plugins loaded by `mongod` that register aggregation stages behind the versioned C ABI in [`include/mongodb_extension_api.h`](include/mongodb_extension_api.h) (vendored from MongoDB’s public extension API).
+## MongoDB extensions: a new idea
 
-The same repository also contains **sample extensions**, documented separately so this file stays focused on the SDK crates.
+In 2025 MongoDB made it possible to load extensions into the server: separately
+built libraries that plug into MongoDB's query engine. An extension registers
+aggregation stages, and those stages go well beyond a single step. A stage can
+expand into several stages, including MongoDB's built-in ones; take part in
+query optimization; split its work across the servers of a cluster; and report
+explain output, metrics, and logs.
 
-The [OpenSearch mongos example](examples/opensearch-mongos/README.md) runs a
-router-only `$vectorSearch` extension with standard Kafka synchronization and
-full document keys on a two-shard cluster. It is separate from the
-[replica-set example](examples/opensearch/README.md).
+MongoDB 8.3 shipped the first version of the server-extension contract, 0.1
+([SERVER-117539](https://jira.mongodb.org/browse/SERVER-117539)), with
+extensions off by default. MongoDB 9.0 raised it to 1.0
+([SERVER-129395](https://jira.mongodb.org/browse/SERVER-129395)) and turned
+extensions on by default
+([SERVER-108108](https://jira.mongodb.org/browse/SERVER-108108)).
 
-The [AWS OpenSearch example](examples/aws-opensearch/README.md) supports both
-topologies with a real OpenSearch domain managed locally by Floci, remote
-autoembeddings, and optional HTTPS/SigV4 transport. Its
-[AWS setup guide](examples/aws-opensearch/AWS.md) describes a provisioned domain
-with Bedrock Titan V2; real AWS execution is not yet verified.
+There is no public documentation for extensions yet. The current source of
+truth is the server source, including the
+[extension overview in the MongoDB repository](https://github.com/mongodb/mongo/blob/master/src/mongo/db/extension/README.md).
 
-**MongoDB Extensions ABI:** this tree targets the vendored C API **version 1.0** (`MONGODB_EXTENSION_API_MAJOR_VERSION` **1**, `MONGODB_EXTENSION_API_MINOR_VERSION` **0** in [`include/mongodb_extension_api.h`](include/mongodb_extension_api.h)). Extensions built with the SDK export `get_mongodb_extension_versions` to advertise that pair, then accept the host-selected version in `get_mongodb_extension` (see [`extension-sdk-mongodb/src/version.rs`](extension-sdk-mongodb/src/version.rs)).
+## Why Rust
 
-**Host safety contract:** MongoDB guarantees that `HostServices` remains valid for
-the extension lifetime; `HostPortal` is valid only during initialization and is
-not retained. Export macros handle the unsafe FFI boundary, while ordinary stage
-implementations use the safe SDK API. Direct callers of `host::set_host_services`
-or `version::host_supports_extension` must now use `unsafe` and satisfy their
-documented pointer contracts. This changes the low-level Rust API, not MongoDB's
-C ABI. The SDK trusts a host that honors the Extensions API contract.
+Two goals appear to stand behind the API:
 
-## Crates
+- **Development separate from the server.** An extension can be built, changed,
+  and shipped without waiting for a new MongoDB release.
+- **Safety by default.** An extension runs inside the database, and the raw C
+  contract is unsafe to use directly. The overview names Rust as the language
+  for production extensions; Rust rules out many memory errors before the code
+  runs.
 
-| Crate | Role |
-|--------|--------|
-| [`extension-sys-mongodb`](extension-sys-mongodb) | `#[repr(C)]` types and constants mirroring the host ABI |
-| [`extension-sdk-mongodb`](extension-sdk-mongodb) | Status and byte-buffer helpers, panic-safe FFI shims, macros to export stages, BSON utilities, and typed errors for stage logic |
+This repository is an attempt at that Rust layer: the unsafe part sits in one
+place, and the extension's own logic stays in safe Rust. Details are in
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
-Depend on **`extension-sdk-mongodb`** from your extension crate; you normally do not need to depend on `extension-sys-mongodb` directly unless you are touching low-level symbols.
+Checking extension signatures is a separate switch,
+`featureFlagExtensionsApiSignatureValidation`. In the 9.0 source it is off by
+default; in the main development branch, the future 9.1, it is on by default
+([SERVER-123691](https://jira.mongodb.org/browse/SERVER-123691)). The
+extensions here are unsigned, so the demos turn the check off explicitly and
+keep loading once it is on.
 
-## Execution model and lifecycle
+## Main example: vector search without mongot
 
-MongoDB owns the query, the aggregation plan, and the cursor. Your extension is a **guest inside the server’s call stack**: the host calls into your exported C entry points; you return statuses and (when asked) BSON payloads. There is no separate async runtime inside the SDK—you finish the work for one host call and return.
+Vector search finds documents by meaning rather than exact words. In MongoDB it
+relies on mongot, a separate search service. In these examples MongoDB keeps the
+documents, a separate vector database stores the vectors, and an extension adds
+the `$vectorSearch` step that connects them. The examples focus on two things:
 
-At a high level, the lifecycle looks like this:
+- **A production-grade search engine.** OpenSearch runs as a cluster with
+  replicated data and is offered as a managed service by cloud providers. The
+  extension is built for that setting: it accepts several OpenSearch addresses
+  and moves to the next one if one fails, limits how long each request may
+  take, and stops when MongoDB cancels the query.
+- **Any vector database.** Documents reach the vector database through Kafka.
+  Switching to another vector database, including one offered by a cloud
+  provider, needs two changes: the Kafka connector plugin that writes to it,
+  and the extension's query code. The AWS setup shows this with OpenSearch on
+  AWS.
 
-1. **Load** — The server `dlopen`s your library, resolves **`get_mongodb_extension_versions`**, selects a compatible API version, then calls **`get_mongodb_extension`** with that version and host services. The SDK rejects unsupported versions, caches host services for later callbacks, and registers your stage descriptor during extension initialization.
-2. **Extension initialize** (optional) — If you use hooks such as **`on_init`** on a map transform, the host may call your extension **initialize** while a host **portal** is valid (e.g. to read extension manifest bytes once).
-3. **Parse** — For each stage instance in a pipeline, the host supplies the **full stage BSON** (a single document whose sole top-level key is your stage name). The SDK decodes it, validates the key and inner argument object, and builds whatever parse node the host ABI expects.
-4. **Open / bind** — When execution starts, **source** stages run **`open`**: arguments → owned **`State`**. **Transform** stages typically hold parsed args and wait for the first upstream row; the host wires your stage after an upstream executable stage when the pipeline requires it.
-5. **Run (`get_next`)** — The host drives the cursor by calling **`get_next`** repeatedly. **Transforms** pull one advanced row from upstream (when present), apply **`transform`**, and return one output row or an error. **Sources** declaring **`requiresInputDocSource: false`** always run their own **`next`**, even when the host attaches an upstream stage. Input-requiring sources retain passthrough for nonempty upstream input and generator fallback when there is no input.
-6. **Teardown** — Cursor completion or failure leads the host to drop execution objects; the SDK drops your **`State`** through the **`drop_state`** hook for source stages.
+| Setup | Guide |
+|-------|-------|
+| Single server | [examples/opensearch](examples/opensearch/README.md) |
+| Cluster | [examples/opensearch-mongos](examples/opensearch-mongos/README.md) |
+| AWS | [examples/aws-opensearch](examples/aws-opensearch/README.md) |
 
-## Kinds of stages (what to implement)
+Design notes: [docs/design/opensearch-mongot-replacement.md](docs/design/opensearch-mongot-replacement.md).
 
-- **Passthrough** — No per-document logic. **`export_transform_stage!`** only forwards documents and optionally enforces an empty inner document (`expect_empty`).
-- **Transform (map)** — There **is** an upstream stream. For each **advanced** upstream document, you emit **one** output document. **`export_map_transform_stage!`** uses plain functions; **`TransformStage`** + **`export_transform_stage_type!`** gives typed **`parse`** + **`transform`** with **`StageContext`**. You may optionally supply **`on_eof`** when upstream ends **before** any row (empty collection) to synthesize a single row from arguments alone, and **`on_init`** for extension-level setup.
-- **Source (generator)** — You implement **`SourceStage`**: **`parse`**, **`open`**, **`next`**. Set **`properties().requires_input`** to **`false`** for a stage that must generate its own results regardless of upstream wiring. The default remains **`true`**, preserving passthrough for nonempty upstream input and generator fallback for absent or empty input.
+## Smaller examples
 
-## Streaming vs “blocking” work
+- [Fibonacci](examples/fibonacci/README.md) (`$fibonacci`) produces a sequence
+  of Fibonacci numbers, one document per number.
+- [HTTP fetch](examples/http-fetch/README.md) (`$httpFetch`) downloads a web
+  page and returns it as one document.
+- [Data federation](examples/data-federation/README.md) (`$readLocalJsonl`)
+  reads records from a JSON Lines file in an allowed folder on the server and
+  returns them as documents.
 
-The host uses a **pull** model: each **`get_next`** asks for **at most one** logical advance for that stage boundary (one transformed row, or one **`Next`** result from your generator).
+All examples are listed in [examples/README.md](examples/README.md).
 
-- **Streaming** here means *cursor-oriented*: you may keep internal buffers, file handles, or parsers in **`State`**, but each successful return that emits a row hands **one** document (and optional metadata) to the host for that call. You can read more data internally between calls; the next **`get_next`** continues where you left off.
-- **Blocking** from an application perspective: your Rust code runs **synchronously** inside the host’s thread until you return. Long CPU or I/O work inside **`transform`** or **`next`** **blocks** that pipeline slice. Prefer bounded work per call, respect **`StageContext::check_interrupt`** and deadlines when the host binds execution context, and avoid unbounded allocations per row.
-
-There is **no** built-in “async stage” API in this SDK layer—if you need backpressure or async I/O, you coordinate it yourself (e.g. incremental reads inside **`next`**) within the synchronous contract.
-
-## `next` and `Next` semantics (source stages)
-
-**[`Next`](extension-sdk-mongodb/src/stage_output.rs)** is the only way a **`SourceStage::next`** implementation signals progress to the host for the generator path:
-
-- **`Next::Advanced { document, metadata }`** — Emit **exactly one** pipeline document for this **`get_next`** invocation. **`metadata`** is optional BSON carried alongside the row when the host supports it.
-- **`Next::Eof`** — The generator is finished; **no** document is emitted for this call. After **`Eof`**, the host should not rely on further rows from this cursor for that stage instance.
-
-You may **skip** work internally (e.g. ignore blank lines) and loop until you have a document to return or hit true end-of-input; the host still sees **one** **`next`** completion per **`get_next`** that advances the source.
-
-## Memory and ownership
-
-- **Opaque stage state** — For **`export_source_stage!`**, **`open`** builds **`State`** owned by a **`Box`**. The SDK converts it to a raw pointer for the host; **`drop_state`** runs when the host tears down the cursor. Do not leak that box outside the hooks the SDK provides.
-- **BSON you return** — Output documents are serialized for the host according to the ABI helpers the crate uses internally (including **`byte_buf`**). Treat returned BSON as **handed off** to the host once the call succeeds; keep your own clones in Rust if you still need them.
-- **Input slices** — During **parse**, stage BSON arrives as a **view** over host memory (`ByteView`). The SDK copies it into a **`bson::Document`** before your **`parse`** / **`open`** logic runs—do not hold pointers into the original view past the FFI shim.
-- **Extension options snapshot** — **`StageContext::extension_options_raw`** returns an **owned** **`Vec<u8>`** when data is available (see module docs).
-
-## Error handling
-
-Stage logic should use **`ExtensionError`** ([`extension-sdk-mongodb/src/error.rs`](extension-sdk-mongodb/src/error.rs)) and the crate’s **`Result<T>`** alias:
-
-- **`BadValue`** — Invalid arguments or disallowed values (user-facing validation).
-- **`FailedToParse`** — BSON / serde shape mismatches (including **`parse_args`** failures).
-- **`Runtime`** — Internal failures (I/O, invariant violations, etc.).
-- **`HostError`** — Propagated from host callbacks (codes and reasons from the extension API).
-
-**`ExtensionError::into_raw_status`** builds a heap **`MongoExtensionStatus`** for **`extern "C"`** returns. **`map_transform`** paths surface **`String`** errors from your callbacks and map them into failures at the boundary. Panics in SDK-wrapped entry points are caught so they **do not unwind across the FFI edge** ([`extension-sdk-mongodb/src/panics.rs`](extension-sdk-mongodb/src/panics.rs)); treat panics as bugs—return **`Result::Err`** for expected failures.
-
-## BSON shape and arguments
-
-Pipeline stages are documents with **exactly one** top-level field: the stage name (including **`$`**) must **match** the static name you registered (e.g. **`TransformStage::NAME`**, **`SourceStage::NAME`**). The **value** of that field is the **argument object** passed to **`parse`** / map callbacks.
-
-- Use **`parse_args::<T>(args_document)`** ([`parse_args`](extension-sdk-mongodb/src/error.rs)) to deserialize the inner object with **serde** when you want typed fields and BSON-friendly scalars.
-- **`expect_empty: true`** means the inner object must be **`{}`** (useful for passthrough markers).
-
-Invalid BSON on the wire fails before your business logic runs, with a parse error classification.
-
-## Talking to the host: `StageContext`
-
-**[`StageContext`](extension-sdk-mongodb/src/stage_context.rs)** is passed into **`SourceStage::open`**, **`SourceStage::next`**, **`TransformStage::transform`**, and related hooks. It is the supported way to:
-
-- **Log** at info / warn / error / debug (no-ops if the logger is unavailable).
-- Read a cached **extension options** blob (manifest/config) when present.
-- Read **`catalog()`** in source `open` and every generator `next`, including EOF:
-  an owned namespace/UUID snapshot captured at AST bind, with `in_router` and
-  explain verbosity. Missing catalog information remains `None`.
-- Update **operation metrics** (counters and timings serialized for the host).
-- Query **deadlines** and call **`check_interrupt`** so long-running **`next`** / **`transform`** work can cooperate with kills and stepdowns.
-
-Until the host binds query execution for a given **`get_next`**, some of these calls are deliberately **no-ops** or return **`None`**—see the type’s module documentation for the exact contract.
-
-## Other contracts worth remembering
-
-- **`Send + 'static`** — **`TransformStage`** and **`SourceStage`** implementations must be sendable and not borrow short-lived stack data across host calls.
-- **One exported extension per `cdylib`** — The provided macros emit one loader symbol pair (**`get_mongodb_extension_versions`** and **`get_mongodb_extension`**); the stock layout assumes **one** logical stage registration per shared library.
-- **ABI stability** — Follow the vendored header and the version structs in **`extension-sys-mongodb`**; do not assume layout beyond what the header documents.
-
-## API quick reference
-
-| Concept | API / type | Role |
-|---------|------------|------|
-| **Passthrough** | **`export_transform_stage!`** | Forwards upstream documents; optional empty inner args. |
-| **Map transform** | **`export_map_transform_stage!`** | **`transform(row, args)`**; optional **`on_eof`**, **`on_init`**. |
-| **Typed transform** | **`TransformStage`** + **`export_transform_stage_type!`** | Typed **`parse`** / **`transform(..., ctx)`**; see rustdoc in [`extension-sdk-mongodb/src/lib.rs`](extension-sdk-mongodb/src/lib.rs). |
-| **Source / generator** | **`SourceStage`** + **`export_source_stage!`** | **`parse` → `open` → `next`** with **`Next`**. |
-| **Execution context** | **`StageContext`** | Logging, options, metrics, deadlines, interrupts. |
-| **Generator output** | **`Next`** | **`Advanced { document, metadata }`** or **`Eof`**. |
-| **Planner BSON** | **`StageProperties`** (+ **`StreamType`**, **`StagePosition`**) | Override **`SourceStage::properties`** / **`TransformStage::properties`**; see **Planner static properties** above. |
-| **Stage plan (model)** | **`StagePlan`** + **`ExecutionModel`** in **[`stage_model`](extension-sdk-mongodb/src/stage_model.rs)** | Single snapshot: planner properties, streaming vs blocking execution, lifecycle; defaults match the export traits. |
-| **Blocking (buffered) logic** | **`BlockingStage`** | **`consume`** per row, **`finish`** → **`Vec<Next>`**; **`properties()`** defaults to the blocking plan; not exported to **`mongod`** yet. |
-
-Typed arguments and errors also use **`ExtensionError`**, **`parse_args`**, and status helpers—see [`extension-sdk-mongodb/src/lib.rs`](extension-sdk-mongodb/src/lib.rs) and the modules under **`extension-sdk-mongodb/src/`**.
-
-## Planner static properties (`get_properties`)
-
-The host calls the AST node’s **`get_properties`** to obtain BSON aligned with MongoDB’s **`MongoExtensionStaticProperties`** IDL (see upstream [`extension_agg_stage_static_properties.idl`](https://github.com/mongodb/mongo/blob/v9.0/src/mongo/db/extension/public/extension_agg_stage_static_properties.idl)). The SDK maps that to Rust types in **[`stage_properties`](extension-sdk-mongodb/src/stage_properties.rs)** and groups planner + execution in **[`stage_model::StagePlan`](extension-sdk-mongodb/src/stage_model.rs)**:
-
-- **`StreamType`** — **`Streaming`** or **`Blocking`** (host field **`streamType`**).
-- **`StagePosition`** — **`Anywhere`**, **`First`**, or **`Last`** (host field **`position`**; **`Anywhere`** maps to IDL **`none`**).
-- **`HostTypeRequirement`** — source stages can override **`host_type()`** to return
-  **`Router`**. `export_source_stage!` then adds **`hostType: "router"`**. The
-  default **`None`** omits this field and preserves existing host placement.
-  Erased `SourceOps` hooks can use **`to_document_with_host_type()`**. Placement
-  alone does not make shard-only native stages such as `$_internalSearchIdLookup`
-  executable on `mongos`.
-- **`StageProperties`** — **`stream_type`**, **`position`**, **`requires_input`** (**`requiresInputDocSource`**); use **`StageProperties::to_document()`** or **`StagePlan::static_properties_document()`** for the BSON sent to **`get_properties`** (other IDL fields use host defaults when omitted).
-- **`ExecutionModel`** — **`Streaming`** (pull / per-row) vs **`Blocking`** (buffer then **`finish`**), aligned with **`StageProperties::stream_type`** in the built-in **`StagePlan`** constructors.
-
-**[`SourceStage`](extension-sdk-mongodb/src/source_stage.rs)** defaults match **`StagePlan::source_default()`**. **[`TransformStage`](extension-sdk-mongodb/src/transform_stage.rs)** defaults match **`StagePlan::transform_streaming_default()`** (same as **`StageProperties::default()`** / **`transform_stage_default()`**). For **collection-less-only** sources, override **`properties()`** as before. Map and passthrough macros use **`default_map_stage_static_properties()`**; **`export_transform_stage_type!`** uses **`<YourType as TransformStage>::properties()`**.
-
-Both traits define **`fn expand(&Args) -> Expansion`** ([**`Expansion`**](extension-sdk-mongodb/src/expansion.rs), also re-exported under **`stage_model`**): **`SelfStage`** or **`Pipeline(Vec<Document>)`**. Typed transforms wire **`expand`** through **`export_transform_stage_type!`**; map-only macros keep the single-AST path.
-
-Re-exports at the crate root: **`StageProperties`**, **`StreamType`**, **`StagePosition`**, **`HostTypeRequirement`**, **`StagePlan`**, **`ExecutionModel`**, **`StageLifecycleShape`**, **`Expansion`**, **`default_map_stage_static_properties`**.
-
-Source stages can optionally implement **`SourceStage::merging_pipeline(args, catalog)`**
-to return native stage documents after catalog bind. The SDK places an owned
-source clone before that suffix in a distributed merger plan; the default is
-`None`. Explicit generators receive a native constant-false `$match` on the
-shards to produce EOF without collection scans. Input-requiring stages retain
-their previous shard input behavior. Raw **`SourceOps`** users set
-**`merging_pipeline: None`** when unused.
-This is a distributed-planning hook, not an unconditional pipeline rewrite.
-
-## Using the Rust SDK for MongoDB Extensions in your extension
-
-1. Add a path or crates.io dependency on **`extension-sdk-mongodb`**.
-2. Set **`[lib] crate-type = ["cdylib"]`** so the compiler produces a shared library the server can load.
-3. Invoke exactly **one** of the `export_*` macros so the unmangled **`get_mongodb_extension_versions`** and **`get_mongodb_extension`** entry points exist.
-4. Install the produced `*.so` and matching extension **`*.conf`** according to MongoDB’s extension host documentation for your server build.
-
-Minimal passthrough example:
-
-```rust
-extension_sdk_mongodb::export_transform_stage!("$myRustPass", true);
-```
-
-Use a **unique** stage name. With `true`, the inner stage document must be empty, e.g. `{ "$myRustPass": {} }`.
-
-## Building the Rust SDK for MongoDB Extensions
-
-With a host toolchain (Rust **1.85+** recommended for the current dependency graph):
-
-```bash
-cargo build -p extension-sdk-mongodb --release
-```
-
-Without installing Rust locally, you can compile from a container (repository root mounted at `/build`):
-
-```bash
-docker run --rm -v "$PWD:/build" -w /build rust:bookworm \
-  cargo build -p extension-sdk-mongodb --release
-```
-
-## Outside this README
+## More documentation
 
 | Topic | Where |
-|--------|--------|
-| Runnable **demo extensions** (Docker, mongosh, ports) | [`examples/README.md`](examples/README.md) |
-| Testing and CI | [`TESTING.md`](TESTING.md) |
+|-------|-------|
+| How the SDK works | [ARCHITECTURE.md](ARCHITECTURE.md) |
+| Shared OpenSearch code | [opensearch-extension-core/README.md](opensearch-extension-core/README.md) |
+| How the project is checked | [TESTING.md](TESTING.md) |
 
 ## License
 
