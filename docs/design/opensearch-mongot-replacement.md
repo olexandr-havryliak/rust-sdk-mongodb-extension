@@ -45,7 +45,8 @@ The architecture is shown as two vertical diagrams in
    embedding. Synchronization is eventually consistent; a few seconds of delay
    between a MongoDB write and searchable vectors is acceptable.
 2. **Aggregation pipeline:** a client submits `$vectorSearch` with `path`, text
-   `query`, optional `limit`, and an optional OpenSearch-DSL `filter`. The extension
+   `query`, optional `limit`, and an optional allowlisted OpenSearch-DSL `filter`
+   (see `opensearch-extension-core/README.md`). The extension
    derives the namespace index and queries `<path>_embedding`. OpenSearch returns
    IDs and scores; MongoDB's `$_internalSearchIdLookup` fetches full documents.
    `$set` or `$project` exposes `$meta: "vectorSearchScore"` in client results.
@@ -116,7 +117,9 @@ failure domains. Current tests verify worker restart recovery, not multi-node
 HA or permanent stale-write safety.
 
 The extension accepts multiple OpenSearch endpoints and tries them with bounded
-request timeouts. Failure of every endpoint returns an error. Background
+request timeouts, capped by the query deadline, and checks for MongoDB
+interrupts before and after each attempt, keeping the host's error code. Failure of
+every endpoint returns an error. Background
 heartbeats are not implemented. See [CONNECTOR.md](../../examples/opensearch/CONNECTOR.md)
 for detailed ordering and recovery limits.
 

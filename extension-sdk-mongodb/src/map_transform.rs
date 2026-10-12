@@ -715,6 +715,40 @@ fn document_from_byte_container(c: &MongoExtensionByteContainer) -> Result<Docum
     Document::from_reader(bytes).map_err(|e| format!("decode result_document: {e}"))
 }
 
+fn empty_byte_container() -> MongoExtensionByteContainer {
+    MongoExtensionByteContainer {
+        type_: MongoExtensionByteContainerType::kByteView,
+        bytes: MongoExtensionByteContainerBytes {
+            view: MongoExtensionByteView {
+                data: std::ptr::null(),
+                len: 0,
+            },
+        },
+    }
+}
+
+/// Destroys a `kByteBuf` whose ownership the upstream stage transferred to this stage.
+fn release_byte_container(c: MongoExtensionByteContainer) {
+    if c.type_ == MongoExtensionByteContainerType::kByteBuf {
+        unsafe {
+            let buf = c.bytes.buf;
+            if !buf.is_null() {
+                ((*(*buf).vtable).destroy)(buf);
+            }
+        }
+    }
+}
+
+/// Destroys upstream-owned `kByteBuf` metadata and clears it; borrowed views stay untouched.
+unsafe fn release_owned_metadata(res: *mut MongoExtensionGetNextResult) {
+    if (*res).result_metadata.type_ == MongoExtensionByteContainerType::kByteBuf {
+        release_byte_container(std::mem::replace(
+            &mut (*res).result_metadata,
+            empty_byte_container(),
+        ));
+    }
+}
+
 #[repr(C)]
 struct ExecObj {
     base: MongoExtensionExecAggStage,
@@ -779,8 +813,11 @@ unsafe extern "C" fn exec_get_next(
 
     if (*res).code == MongoExtensionGetNextResultCode::kAdvanced {
         (*this).saw_upstream_advanced.set(true);
+        let upstream_doc = std::mem::replace(&mut (*res).result_document, empty_byte_container());
+        let row = document_from_byte_container(&upstream_doc);
+        release_byte_container(upstream_doc);
         let mapped = ffi_boundary(|| -> Result<(), String> {
-            let row = document_from_byte_container(&(*res).result_document)?;
+            let row = row?;
             let args_bytes: &[u8] = &(*this).args;
             let args = Document::from_reader(args_bytes).map_err(|e| e.to_string())?;
             let mg = map_globals();
@@ -792,6 +829,9 @@ unsafe extern "C" fn exec_get_next(
             };
             Ok(())
         });
+        if !matches!(mapped, Some(Ok(()))) {
+            release_owned_metadata(res);
+        }
         return match mapped {
             None => status::new_error_status(-1, "panic during map transform"),
             Some(Err(e)) => status::new_error_status(-1, e),
@@ -812,6 +852,7 @@ unsafe extern "C" fn exec_get_next(
                     byte_buf::from_bson(&out).map_err(|e| e.to_string())
                 },
             );
+            release_owned_metadata(res);
             return match synth {
                 None => status::new_error_status(-1, "panic during on_eof_no_rows"),
                 Some(Err(e)) => status::new_error_status(-1, e),
@@ -822,14 +863,7 @@ unsafe extern "C" fn exec_get_next(
                         type_: MongoExtensionByteContainerType::kByteBuf,
                         bytes: MongoExtensionByteContainerBytes { buf: raw },
                     };
-                    let empty_view = MongoExtensionByteView {
-                        data: std::ptr::null(),
-                        len: 0,
-                    };
-                    (*res).result_metadata = MongoExtensionByteContainer {
-                        type_: MongoExtensionByteContainerType::kByteView,
-                        bytes: MongoExtensionByteContainerBytes { view: empty_view },
-                    };
+                    (*res).result_metadata = empty_byte_container();
                     status::status_ok()
                 }
             };
@@ -1038,4 +1072,309 @@ pub unsafe fn get_map_extension_impl(
     let obj = addr as *const ExtensionObj;
     *extension_out = std::ptr::addr_of!((*obj).base);
     status::status_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sys::{
+        MongoExtensionByteBuf, MongoExtensionByteBufVTable, MONGO_EXTENSION_STATUS_OK,
+    };
+    use bson::doc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    fn tag_row(row: &Document, _: &Document) -> Result<Document, String> {
+        if row.get_bool("fail").unwrap_or(false) {
+            return Err("transform rejected row".into());
+        }
+        if row.get_bool("panic").unwrap_or(false) {
+            panic!("transform panicked");
+        }
+        let mut out = row.clone();
+        out.insert("mapped", true);
+        Ok(out)
+    }
+
+    fn generate_from_args(args: &Document) -> Result<Document, String> {
+        if args.get_bool("fail").unwrap_or(false) {
+            return Err("generator rejected args".into());
+        }
+        Ok(doc! { "generated": true })
+    }
+
+    fn install_globals() {
+        let _ = MAP_ACTIVE_STAGE.get_or_init(|| MapStageGlobals {
+            name: "$leakProbe",
+            expect_empty: false,
+            transform: tag_row,
+            on_eof_no_rows: Some(generate_from_args),
+            on_extension_initialized: None,
+            static_properties_doc: crate::stage_properties::default_map_stage_static_properties,
+            expand_from_args_doc: None,
+        });
+    }
+
+    #[repr(C)]
+    struct CountedBuf {
+        base: MongoExtensionByteBuf,
+        data: Vec<u8>,
+        destroyed: Arc<AtomicUsize>,
+    }
+
+    unsafe extern "C" fn counted_destroy(p: *mut MongoExtensionByteBuf) {
+        let b = Box::from_raw(p.cast::<CountedBuf>());
+        b.destroyed.fetch_add(1, Ordering::SeqCst);
+    }
+
+    unsafe extern "C" fn counted_view(p: *const MongoExtensionByteBuf) -> MongoExtensionByteView {
+        let d = &(*p.cast::<CountedBuf>()).data;
+        MongoExtensionByteView {
+            data: d.as_ptr(),
+            len: d.len() as u64,
+        }
+    }
+
+    static COUNTED_VTABLE: MongoExtensionByteBufVTable = MongoExtensionByteBufVTable {
+        destroy: counted_destroy,
+        get_view: counted_view,
+    };
+
+    fn counted_buf(data: Vec<u8>, destroyed: &Arc<AtomicUsize>) -> *mut MongoExtensionByteBuf {
+        Box::into_raw(Box::new(CountedBuf {
+            base: MongoExtensionByteBuf {
+                vtable: &COUNTED_VTABLE,
+            },
+            data,
+            destroyed: Arc::clone(destroyed),
+        }))
+        .cast()
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Meta {
+        Owned,
+        Borrowed,
+    }
+
+    /// Upstream that emits one result: `row` bytes as an owned `kByteBuf` (or `kEOF` when
+    /// `None`), plus `$vectorSearchScore` metadata that is either owned or borrowed.
+    #[repr(C)]
+    struct FakeUpstream {
+        base: MongoExtensionExecAggStage,
+        row: Option<Vec<u8>>,
+        meta: Meta,
+        meta_bytes: Vec<u8>,
+        doc_frees: Arc<AtomicUsize>,
+        meta_frees: Arc<AtomicUsize>,
+    }
+
+    fn meta_doc() -> Document {
+        doc! { "$vectorSearchScore": 0.5 }
+    }
+
+    unsafe extern "C" fn upstream_get_next(
+        p: *mut MongoExtensionExecAggStage,
+        _: *mut MongoExtensionQueryExecutionContext,
+        res: *mut MongoExtensionGetNextResult,
+    ) -> *mut MongoExtensionStatus {
+        let this = &*p.cast::<FakeUpstream>();
+        match &this.row {
+            Some(bytes) => {
+                (*res).code = MongoExtensionGetNextResultCode::kAdvanced;
+                (*res).result_document = MongoExtensionByteContainer {
+                    type_: MongoExtensionByteContainerType::kByteBuf,
+                    bytes: MongoExtensionByteContainerBytes {
+                        buf: counted_buf(bytes.clone(), &this.doc_frees),
+                    },
+                };
+            }
+            None => {
+                (*res).code = MongoExtensionGetNextResultCode::kEOF;
+                (*res).result_document = empty_byte_container();
+            }
+        }
+        (*res).result_metadata = match this.meta {
+            Meta::Owned => MongoExtensionByteContainer {
+                type_: MongoExtensionByteContainerType::kByteBuf,
+                bytes: MongoExtensionByteContainerBytes {
+                    buf: counted_buf(this.meta_bytes.clone(), &this.meta_frees),
+                },
+            },
+            Meta::Borrowed => MongoExtensionByteContainer {
+                type_: MongoExtensionByteContainerType::kByteView,
+                bytes: MongoExtensionByteContainerBytes {
+                    view: MongoExtensionByteView {
+                        data: this.meta_bytes.as_ptr(),
+                        len: this.meta_bytes.len() as u64,
+                    },
+                },
+            },
+        };
+        status::status_ok()
+    }
+
+    static UPSTREAM_VTABLE: MongoExtensionExecAggStageVTable = MongoExtensionExecAggStageVTable {
+        get_next: upstream_get_next,
+        ..EXEC_VTABLE
+    };
+
+    struct Pulled {
+        code: i32,
+        document: Option<Document>,
+        metadata: Option<Document>,
+        doc_frees: usize,
+        /// Metadata buffers destroyed by the stage, before the caller releases what it received.
+        meta_frees: usize,
+    }
+
+    /// Reads the container as a caller would, destroying it when the caller owns it.
+    unsafe fn take_container(c: &MongoExtensionByteContainer) -> Option<Document> {
+        let doc = match c.type_ {
+            MongoExtensionByteContainerType::kByteBuf => {
+                let buf = c.bytes.buf;
+                let view = ((*(*buf).vtable).get_view)(buf);
+                let d =
+                    Document::from_reader(std::slice::from_raw_parts(view.data, view.len as usize))
+                        .unwrap();
+                ((*(*buf).vtable).destroy)(buf);
+                d
+            }
+            MongoExtensionByteContainerType::kByteView => {
+                let view = c.bytes.view;
+                if view.data.is_null() || view.len == 0 {
+                    return None;
+                }
+                Document::from_reader(std::slice::from_raw_parts(view.data, view.len as usize))
+                    .unwrap()
+            }
+        };
+        Some(doc)
+    }
+
+    /// Pulls one result through the map stage built with `args` on top of a fake upstream.
+    unsafe fn pull(row: Option<Vec<u8>>, meta: Meta, args: Document) -> Pulled {
+        install_globals();
+        let doc_frees = Arc::new(AtomicUsize::new(0));
+        let meta_frees = Arc::new(AtomicUsize::new(0));
+        let mut upstream = FakeUpstream {
+            base: MongoExtensionExecAggStage {
+                vtable: &UPSTREAM_VTABLE,
+            },
+            row,
+            meta,
+            meta_bytes: bson::to_vec(&meta_doc()).unwrap(),
+            doc_frees: Arc::clone(&doc_frees),
+            meta_frees: Arc::clone(&meta_frees),
+        };
+        let exec = Box::into_raw(Box::new(exec_alloc(bson::to_vec(&args).unwrap())))
+            .cast::<MongoExtensionExecAggStage>();
+        let st = exec_set_source(exec, std::ptr::addr_of_mut!(upstream).cast());
+        ((*(*st).vtable).destroy)(st);
+        let mut res = std::mem::MaybeUninit::<MongoExtensionGetNextResult>::uninit();
+        let st = exec_get_next(exec, std::ptr::null_mut(), res.as_mut_ptr());
+        let code = ((*(*st).vtable).get_code)(st);
+        ((*(*st).vtable).destroy)(st);
+        let res = res.assume_init();
+        let stage_meta_frees = meta_frees.load(Ordering::SeqCst);
+        let document = if code == MONGO_EXTENSION_STATUS_OK {
+            take_container(&res.result_document)
+        } else {
+            None
+        };
+        let metadata = take_container(&res.result_metadata);
+        exec_destroy(exec);
+        Pulled {
+            code,
+            document,
+            metadata,
+            doc_frees: doc_frees.load(Ordering::SeqCst),
+            meta_frees: stage_meta_frees,
+        }
+    }
+
+    unsafe fn pull_row(row: Document, meta: Meta) -> Pulled {
+        pull(Some(bson::to_vec(&row).unwrap()), meta, doc! {})
+    }
+
+    #[test]
+    fn mapped_row_releases_upstream_owned_buffer() {
+        let r = unsafe { pull_row(doc! { "_id": 1 }, Meta::Borrowed) };
+        assert_eq!(r.code, MONGO_EXTENSION_STATUS_OK);
+        assert_eq!(r.document, Some(doc! { "_id": 1, "mapped": true }));
+        assert_eq!(
+            r.doc_frees, 1,
+            "upstream kByteBuf must be destroyed exactly once"
+        );
+    }
+
+    #[test]
+    fn failed_transform_releases_upstream_owned_buffer() {
+        let r = unsafe { pull_row(doc! { "_id": 2, "fail": true }, Meta::Borrowed) };
+        assert_ne!(r.code, MONGO_EXTENSION_STATUS_OK);
+        assert_eq!(r.document, None);
+        assert_eq!(
+            r.doc_frees, 1,
+            "upstream kByteBuf must be destroyed on errors too"
+        );
+    }
+
+    #[test]
+    fn mapped_row_hands_owned_metadata_to_caller() {
+        let r = unsafe { pull_row(doc! { "_id": 3 }, Meta::Owned) };
+        assert_eq!(r.code, MONGO_EXTENSION_STATUS_OK);
+        assert_eq!(r.meta_frees, 0, "stage must not free metadata it passes on");
+        assert_eq!(r.metadata, Some(meta_doc()));
+    }
+
+    #[test]
+    fn failed_transform_releases_owned_metadata() {
+        let r = unsafe { pull_row(doc! { "_id": 4, "fail": true }, Meta::Owned) };
+        assert_ne!(r.code, MONGO_EXTENSION_STATUS_OK);
+        assert_eq!(r.meta_frees, 1);
+        assert_eq!(
+            r.metadata, None,
+            "released metadata must not be left in the result"
+        );
+    }
+
+    #[test]
+    fn undecodable_row_releases_owned_metadata() {
+        let r = unsafe { pull(Some(vec![1, 2, 3]), Meta::Owned, doc! {}) };
+        assert_ne!(r.code, MONGO_EXTENSION_STATUS_OK);
+        assert_eq!(r.meta_frees, 1);
+        assert_eq!(r.metadata, None);
+    }
+
+    #[test]
+    fn panicking_transform_releases_owned_metadata() {
+        let r = unsafe { pull_row(doc! { "_id": 5, "panic": true }, Meta::Owned) };
+        assert_ne!(r.code, MONGO_EXTENSION_STATUS_OK);
+        assert_eq!(r.meta_frees, 1);
+        assert_eq!(r.metadata, None);
+    }
+
+    #[test]
+    fn failed_transform_leaves_borrowed_metadata_alone() {
+        let r = unsafe { pull_row(doc! { "_id": 6, "fail": true }, Meta::Borrowed) };
+        assert_ne!(r.code, MONGO_EXTENSION_STATUS_OK);
+        assert_eq!(r.metadata, Some(meta_doc()));
+    }
+
+    #[test]
+    fn synthetic_eof_row_releases_owned_metadata() {
+        let r = unsafe { pull(None, Meta::Owned, doc! {}) };
+        assert_eq!(r.code, MONGO_EXTENSION_STATUS_OK);
+        assert_eq!(r.document, Some(doc! { "generated": true }));
+        assert_eq!(r.meta_frees, 1);
+        assert_eq!(r.metadata, None);
+    }
+
+    #[test]
+    fn failed_synthetic_eof_releases_owned_metadata() {
+        let r = unsafe { pull(None, Meta::Owned, doc! { "fail": true }) };
+        assert_ne!(r.code, MONGO_EXTENSION_STATUS_OK);
+        assert_eq!(r.meta_frees, 1);
+        assert_eq!(r.metadata, None);
+    }
 }

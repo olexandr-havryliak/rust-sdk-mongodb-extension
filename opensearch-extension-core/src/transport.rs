@@ -1,5 +1,8 @@
 use std::time::{Duration, SystemTime};
 
+/// Largest OpenSearch response body accepted (1000 hits with 512-byte keys fit comfortably).
+pub const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
 use aws_credential_types::Credentials;
 use aws_sigv4::http_request::{sign, SignableBody, SignableRequest, SigningSettings};
 use aws_sigv4::sign::v4;
@@ -100,9 +103,20 @@ pub fn post_search(url: &str, body: &Value, timeout: Duration) -> Result<Value, 
     if response.status() != 200 {
         return Err(format!("OpenSearch HTTP {}", response.status()));
     }
-    response
-        .into_json()
-        .map_err(|_| "Invalid OpenSearch JSON response".into())
+    read_json_capped(response.into_reader(), MAX_RESPONSE_BYTES)
+}
+
+fn read_json_capped(reader: impl std::io::Read, max: usize) -> Result<Value, String> {
+    use std::io::Read;
+    let mut body = Vec::new();
+    reader
+        .take(max as u64 + 1)
+        .read_to_end(&mut body)
+        .map_err(|_| "OpenSearch transport failed")?;
+    if body.len() > max {
+        return Err(format!("OpenSearch response too large (limit {max} bytes)"));
+    }
+    serde_json::from_slice(&body).map_err(|_| "Invalid OpenSearch JSON response".into())
 }
 
 #[cfg(test)]
@@ -119,6 +133,64 @@ mod tests {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         move |key| values.get(key).cloned()
+    }
+
+    /// Serves one HTTP 200 response with `body` and returns the server URL.
+    fn serve_once(body: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/idx/_search", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            let length: usize = String::from_utf8_lossy(&request)
+                .lines()
+                .find_map(|l| {
+                    let (name, value) = l.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse().unwrap())
+                })
+                .unwrap_or(0);
+            stream.read_exact(&mut vec![0; length]).unwrap();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            let _ = stream.write_all(&body);
+        });
+        (url, worker)
+    }
+
+    fn padded_json(total_len: usize) -> Vec<u8> {
+        let mut body = br#"{"hits":{"hits":[]}}"#.to_vec();
+        body.resize(total_len, b' ');
+        body
+    }
+
+    #[test]
+    fn response_at_size_limit_is_accepted() {
+        let (url, worker) = serve_once(padded_json(MAX_RESPONSE_BYTES));
+        let result = post_search(&url, &serde_json::json!({}), Duration::from_secs(5));
+        worker.join().unwrap();
+        assert_eq!(result.unwrap(), serde_json::json!({"hits": {"hits": []}}));
+    }
+
+    #[test]
+    fn oversized_response_is_rejected() {
+        let (url, worker) = serve_once(padded_json(MAX_RESPONSE_BYTES + 1));
+        let result = post_search(&url, &serde_json::json!({}), Duration::from_secs(5));
+        worker.join().unwrap();
+        let err = result.unwrap_err();
+        assert!(err.contains("too large"), "{err}");
     }
 
     #[test]

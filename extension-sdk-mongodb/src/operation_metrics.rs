@@ -1,6 +1,6 @@
 //! BSON-backed [`MongoExtensionOperationMetrics`](crate::sys::MongoExtensionOperationMetrics) for stages.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use bson::Document;
 
@@ -11,10 +11,13 @@ use crate::sys::{
     MongoExtensionStatus,
 };
 
+/// Metrics document shared between the host-owned metrics object and the stage that fills it.
+pub(crate) type SharedMetrics = Arc<Mutex<Document>>;
+
 #[repr(C)]
-pub(crate) struct SdkOperationMetrics {
-    pub base: MongoExtensionOperationMetrics,
-    pub(crate) doc: Mutex<Document>,
+struct SdkOperationMetrics {
+    base: MongoExtensionOperationMetrics,
+    doc: SharedMetrics,
 }
 
 unsafe extern "C" fn sdk_met_destroy(p: *mut MongoExtensionOperationMetrics) {
@@ -69,12 +72,19 @@ static SDK_METRICS_VTABLE: MongoExtensionOperationMetricsVTable =
         update: sdk_met_update,
     };
 
-pub(crate) fn alloc_sdk_operation_metrics() -> *mut MongoExtensionOperationMetrics {
+/// Allocates a metrics object whose ownership passes to the host, plus the stage's handle to the
+/// same document. Either side may be dropped first.
+pub(crate) fn alloc_sdk_operation_metrics() -> (*mut MongoExtensionOperationMetrics, SharedMetrics)
+{
+    let doc = SharedMetrics::default();
     let m = Box::new(SdkOperationMetrics {
         base: MongoExtensionOperationMetrics {
             vtable: &SDK_METRICS_VTABLE,
         },
-        doc: Mutex::new(Document::new()),
+        doc: Arc::clone(&doc),
     });
-    Box::into_raw(m).cast::<MongoExtensionOperationMetrics>()
+    (
+        Box::into_raw(m).cast::<MongoExtensionOperationMetrics>(),
+        doc,
+    )
 }

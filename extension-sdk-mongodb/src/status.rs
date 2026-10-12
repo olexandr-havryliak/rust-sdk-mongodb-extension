@@ -35,20 +35,35 @@ unsafe extern "C" fn err_get_reason(p: *const MongoExtensionStatus) -> MongoExte
     }
 }
 
-unsafe extern "C" fn err_set_code(_p: *mut MongoExtensionStatus, _c: i32) {}
+unsafe extern "C" fn err_set_code(p: *mut MongoExtensionStatus, c: i32) {
+    (*p.cast::<OwnedErrorStatus>()).code = c;
+}
 
+fn reason_cstring(reason: &str) -> CString {
+    CString::new(reason.replace('\0', "\u{FFFD}")).expect("NUL bytes were replaced")
+}
+
+/// Returns the status of the update itself (OK), never `p`: the caller destroys the result.
 unsafe extern "C" fn err_set_reason(
     p: *mut MongoExtensionStatus,
-    _r: MongoExtensionByteView,
+    r: MongoExtensionByteView,
 ) -> *mut MongoExtensionStatus {
-    p
+    let text = if r.data.is_null() || r.len == 0 {
+        String::new()
+    } else {
+        String::from_utf8_lossy(std::slice::from_raw_parts(r.data, r.len as usize)).into_owned()
+    };
+    (*p.cast::<OwnedErrorStatus>()).reason = reason_cstring(&text);
+    status_ok()
 }
 
 unsafe extern "C" fn err_clone(
-    _p: *const MongoExtensionStatus,
-    _out: *mut *mut MongoExtensionStatus,
+    p: *const MongoExtensionStatus,
+    out: *mut *mut MongoExtensionStatus,
 ) -> *mut MongoExtensionStatus {
-    std::ptr::null_mut()
+    let this = &*p.cast::<OwnedErrorStatus>();
+    *out = new_error_status(this.code, this.reason.to_string_lossy());
+    status_ok()
 }
 
 static ERR_VTABLE: MongoExtensionStatusVTable = MongoExtensionStatusVTable {
@@ -62,8 +77,7 @@ static ERR_VTABLE: MongoExtensionStatusVTable = MongoExtensionStatusVTable {
 
 /// Heap-allocated error status (host will call `destroy`).
 pub fn new_error_status(code: i32, reason: impl Into<String>) -> *mut MongoExtensionStatus {
-    let reason =
-        CString::new(reason.into()).unwrap_or_else(|_| CString::new("extension error").unwrap());
+    let reason = reason_cstring(&reason.into());
     let b = Box::new(OwnedErrorStatus {
         base: MongoExtensionStatus {
             vtable: &ERR_VTABLE,
@@ -124,4 +138,77 @@ pub fn status_ok() -> *mut MongoExtensionStatus {
         OK_PTR = Box::into_raw(b);
     });
     unsafe { OK_PTR }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn view(bytes: &[u8]) -> MongoExtensionByteView {
+        MongoExtensionByteView {
+            data: bytes.as_ptr(),
+            len: bytes.len() as u64,
+        }
+    }
+
+    unsafe fn code(st: *const MongoExtensionStatus) -> i32 {
+        ((*(*st).vtable).get_code)(st)
+    }
+
+    unsafe fn reason(st: *const MongoExtensionStatus) -> String {
+        let v = ((*(*st).vtable).get_reason)(st);
+        if v.data.is_null() {
+            return String::new();
+        }
+        String::from_utf8(std::slice::from_raw_parts(v.data, v.len as usize).to_vec()).unwrap()
+    }
+
+    unsafe fn destroy(st: *mut MongoExtensionStatus) {
+        ((*(*st).vtable).destroy)(st);
+    }
+
+    #[test]
+    fn host_can_populate_extension_owned_status() {
+        unsafe {
+            let st = new_error_status(MONGO_EXTENSION_STATUS_OK, "");
+            ((*(*st).vtable).set_code)(st, 11601);
+            let ret = ((*(*st).vtable).set_reason)(st, view(b"operation was interrupted"));
+            assert!(!ret.is_null());
+            assert_ne!(
+                ret, st,
+                "set_reason must not hand ownership of the target back"
+            );
+            assert_eq!(code(ret), MONGO_EXTENSION_STATUS_OK);
+            destroy(ret);
+            assert_eq!(code(st), 11601);
+            assert_eq!(reason(st), "operation was interrupted");
+            destroy(st);
+        }
+    }
+
+    #[test]
+    fn set_reason_keeps_text_with_interior_nul() {
+        unsafe {
+            let st = new_error_status(1, "old");
+            destroy(((*(*st).vtable).set_reason)(st, view(b"a\0b")));
+            assert_eq!(reason(st), "a\u{FFFD}b");
+            destroy(st);
+        }
+    }
+
+    #[test]
+    fn clone_produces_independent_copy() {
+        unsafe {
+            let st = new_error_status(42, "boom");
+            let mut copy = std::ptr::null_mut();
+            let ret = ((*(*st).vtable).clone)(st, &mut copy);
+            assert_eq!(code(ret), MONGO_EXTENSION_STATUS_OK);
+            destroy(ret);
+            assert!(!copy.is_null());
+            destroy(st);
+            assert_eq!(code(copy), 42);
+            assert_eq!(reason(copy), "boom");
+            destroy(copy);
+        }
+    }
 }

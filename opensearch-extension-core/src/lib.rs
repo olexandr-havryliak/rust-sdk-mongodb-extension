@@ -12,6 +12,7 @@ pub mod transport;
 const DEFAULT_LIMIT: i64 = 10;
 const MAX_LIMIT: i64 = 1000;
 const DEFAULT_TIMEOUT_MS: u64 = 2_000;
+const MAX_FILTER_DEPTH: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenSearchConfig {
@@ -70,12 +71,160 @@ fn bson_i64(args: &Document, key: &str, default: i64, min: i64, max: i64) -> Ext
 }
 
 pub fn parse_vector_search_args(args: Document) -> ExtensionResult<QueryArgs> {
+    let filter = match args.get("filter") {
+        None => None,
+        Some(Bson::Document(filter)) => {
+            let mut clauses = 0;
+            validate_filter_clause(filter, 1, &mut clauses)?;
+            Some(filter.clone())
+        }
+        Some(_) => return Err(bad_filter("filter must be a document")),
+    };
     Ok(QueryArgs {
         path: bson_string(&args, "path")?,
         query: bson_string(&args, "query")?,
         limit: bson_i64(&args, "limit", DEFAULT_LIMIT, 1, MAX_LIMIT)?,
-        filter: args.get_document("filter").ok().cloned(),
+        filter,
     })
+}
+
+const MAX_FILTER_CLAUSES: usize = 256;
+const MAX_FILTER_TERMS: usize = 1024;
+
+fn bad_filter(message: impl std::fmt::Display) -> ExtensionError {
+    ExtensionError::BadValue(format!("filter: {message}"))
+}
+
+/// The filter is forwarded to OpenSearch as query DSL, so only a closed set of cheap,
+/// single-index clauses is accepted (no scripts, lookups, or pattern queries).
+fn validate_filter_clause(
+    clause: &Document,
+    depth: usize,
+    clauses: &mut usize,
+) -> ExtensionResult<()> {
+    *clauses += 1;
+    if depth > MAX_FILTER_DEPTH || *clauses > MAX_FILTER_CLAUSES {
+        return Err(bad_filter("too deeply nested or too many clauses"));
+    }
+    let (kind, body) = single_entry(clause, "each clause must have exactly one query type")?;
+    let body = body
+        .as_document()
+        .ok_or_else(|| bad_filter(format!("{kind} must be a document")))?;
+    match kind.as_str() {
+        "bool" => validate_bool(body, depth, clauses),
+        "term" => {
+            let value = single_field(body, "term")?;
+            match value {
+                Bson::Document(d) => {
+                    let (key, inner) = single_entry(d, "term accepts only {value: <scalar>}")?;
+                    if key != "value" {
+                        return Err(bad_filter("term accepts only {value: <scalar>}"));
+                    }
+                    require_scalar(inner, "term")
+                }
+                other => require_scalar(other, "term"),
+            }
+        }
+        "terms" => {
+            let values = single_field(body, "terms")?
+                .as_array()
+                .ok_or_else(|| bad_filter("terms must map one field to an array of values"))?;
+            if values.len() > MAX_FILTER_TERMS {
+                return Err(bad_filter("terms has too many values"));
+            }
+            values.iter().try_for_each(|v| require_scalar(v, "terms"))
+        }
+        "range" => {
+            let bounds = single_field(body, "range")?
+                .as_document()
+                .ok_or_else(|| bad_filter("range must map one field to bounds"))?;
+            for (op, value) in bounds {
+                match op.as_str() {
+                    "gt" | "gte" | "lt" | "lte" => require_scalar(value, "range")?,
+                    "format" if matches!(value, Bson::String(_)) => {}
+                    _ => return Err(bad_filter(format!("unsupported range option {op}"))),
+                }
+            }
+            Ok(())
+        }
+        "exists" => {
+            let (key, field) = single_entry(body, "exists accepts only {field: <name>}")?;
+            match (key.as_str(), field) {
+                ("field", Bson::String(name)) => validate_field_name(name),
+                _ => Err(bad_filter("exists accepts only {field: <name>}")),
+            }
+        }
+        "ids" => {
+            let (key, values) = single_entry(body, "ids accepts only {values: [<string>]}")?;
+            let values = values
+                .as_array()
+                .filter(|_| key == "values")
+                .ok_or_else(|| bad_filter("ids accepts only {values: [<string>]}"))?;
+            if values.len() > MAX_FILTER_TERMS || !values.iter().all(|v| v.as_str().is_some()) {
+                return Err(bad_filter("ids accepts only {values: [<string>]}"));
+            }
+            Ok(())
+        }
+        other => Err(bad_filter(format!("unsupported query type {other}"))),
+    }
+}
+
+fn validate_bool(body: &Document, depth: usize, clauses: &mut usize) -> ExtensionResult<()> {
+    for (occur, value) in body {
+        match occur.as_str() {
+            "must" | "filter" | "should" | "must_not" => match value {
+                Bson::Document(d) => validate_filter_clause(d, depth + 1, clauses)?,
+                Bson::Array(items) => {
+                    for item in items {
+                        let d = item.as_document().ok_or_else(|| {
+                            bad_filter(format!("bool.{occur} items must be clauses"))
+                        })?;
+                        validate_filter_clause(d, depth + 1, clauses)?;
+                    }
+                }
+                _ => {
+                    return Err(bad_filter(format!(
+                        "bool.{occur} must be a clause or array"
+                    )))
+                }
+            },
+            "minimum_should_match"
+                if matches!(value, Bson::Int32(_) | Bson::Int64(_) | Bson::String(_)) => {}
+            _ => return Err(bad_filter(format!("unsupported bool option {occur}"))),
+        }
+    }
+    Ok(())
+}
+
+fn single_entry<'a>(d: &'a Document, message: &str) -> ExtensionResult<(&'a String, &'a Bson)> {
+    let mut entries = d.iter();
+    match (entries.next(), entries.next()) {
+        (Some(entry), None) => Ok(entry),
+        _ => Err(bad_filter(message)),
+    }
+}
+
+fn single_field<'a>(body: &'a Document, kind: &str) -> ExtensionResult<&'a Bson> {
+    let (field, value) = single_entry(body, &format!("{kind} must target exactly one field"))?;
+    validate_field_name(field)?;
+    Ok(value)
+}
+
+fn validate_field_name(name: &str) -> ExtensionResult<()> {
+    if name.is_empty() || name.starts_with('_') {
+        return Err(bad_filter(format!("field {name:?} is not allowed")));
+    }
+    Ok(())
+}
+
+fn require_scalar(value: &Bson, kind: &str) -> ExtensionResult<()> {
+    match value {
+        Bson::String(_) | Bson::Boolean(_) | Bson::Int32(_) | Bson::Int64(_) => Ok(()),
+        Bson::Double(v) if v.is_finite() => Ok(()),
+        _ => Err(bad_filter(format!(
+            "{kind} values must be strings, numbers or booleans"
+        ))),
+    }
 }
 
 pub fn parse_config(raw: Option<Vec<u8>>) -> ExtensionResult<OpenSearchConfig> {
@@ -175,6 +324,57 @@ fn bson_doc_to_json(doc: &Document) -> Value {
     serde_json::to_value(Bson::Document(doc.clone())).unwrap_or(Value::Null)
 }
 
+/// HTTP timeout for one OpenSearch attempt: `max`, shortened to the time left before the query
+/// deadline (`i64::MAX` means no deadline).
+pub fn request_timeout(
+    deadline_ms: Option<i64>,
+    now_ms: i64,
+    max: Duration,
+) -> ExtensionResult<Duration> {
+    let Some(deadline) = deadline_ms.filter(|d| *d != i64::MAX) else {
+        return Ok(max);
+    };
+    let remaining = deadline.saturating_sub(now_ms);
+    if remaining <= 0 {
+        return Err(ExtensionError::Runtime(
+            "query deadline exceeded before OpenSearch request".into(),
+        ));
+    }
+    Ok(max.min(Duration::from_millis(remaining as u64)))
+}
+
+/// Host interrupt and deadline checks consulted around each OpenSearch request.
+pub(crate) trait QueryControl {
+    fn check_interrupt(&mut self) -> ExtensionResult<()>;
+    fn deadline_timestamp_ms(&mut self) -> ExtensionResult<Option<i64>>;
+}
+
+impl QueryControl for StageContext {
+    fn check_interrupt(&mut self) -> ExtensionResult<()> {
+        StageContext::check_interrupt(self)
+    }
+
+    fn deadline_timestamp_ms(&mut self) -> ExtensionResult<Option<i64>> {
+        StageContext::deadline_timestamp_ms(self)
+    }
+}
+
+/// Checks for interrupts and returns the timeout for the next OpenSearch attempt.
+pub(crate) fn next_attempt_timeout(
+    ctx: &mut impl QueryControl,
+    max: Duration,
+) -> ExtensionResult<Duration> {
+    ctx.check_interrupt()?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    request_timeout(ctx.deadline_timestamp_ms()?, now_ms, max)
+}
+
+pub(crate) fn default_timeout() -> Duration {
+    Duration::from_millis(DEFAULT_TIMEOUT_MS)
+}
+
 pub fn open_state(args: QueryArgs, ctx: &mut StageContext) -> ExtensionResult<SearchState> {
     let catalog = ctx.catalog().ok_or_else(|| {
         ExtensionError::BadValue(
@@ -186,7 +386,7 @@ pub fn open_state(args: QueryArgs, ctx: &mut StageContext) -> ExtensionResult<Se
         args,
         index: format!("mongodb.{}", catalog.namespace()),
         config,
-        timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
+        timeout: default_timeout(),
         pending: VecDeque::new(),
         loaded: false,
     })
@@ -195,7 +395,7 @@ pub fn open_state(args: QueryArgs, ctx: &mut StageContext) -> ExtensionResult<Se
 pub fn next_result(state: &mut SearchState, ctx: &mut StageContext) -> ExtensionResult<Next> {
     ctx.check_interrupt()?;
     if !state.loaded {
-        state.pending = VecDeque::from(fetch_candidates(state)?);
+        state.pending = VecDeque::from(fetch_candidates(state, ctx)?);
         state.loaded = true;
     }
     match state.pending.pop_front() {
@@ -209,18 +409,21 @@ pub fn next_result(state: &mut SearchState, ctx: &mut StageContext) -> Extension
     }
 }
 
-fn fetch_candidates(state: &SearchState) -> ExtensionResult<Vec<Document>> {
+fn fetch_candidates(
+    state: &SearchState,
+    ctx: &mut impl QueryControl,
+) -> ExtensionResult<Vec<Document>> {
     let body = opensearch_body(&state.args);
     let score_key = "$vectorSearchScore";
     let mut last_error = None;
     for endpoint in &state.config.endpoints {
-        match fetch_candidates_from_endpoint(
-            endpoint,
-            &state.index,
-            &body,
-            score_key,
-            state.timeout,
-        ) {
+        let timeout = next_attempt_timeout(ctx, state.timeout)?;
+        let url = format!("{}/{}/_search", endpoint.trim_end_matches('/'), state.index);
+        let response = transport::post_search(&url, &body, timeout);
+        ctx.check_interrupt()?;
+        match response
+            .and_then(|value| decode_candidates(&value, score_key, state.args.limit as usize))
+        {
             Ok(documents) => return Ok(documents),
             Err(err) => last_error = Some(err),
         }
@@ -231,19 +434,21 @@ fn fetch_candidates(state: &SearchState) -> ExtensionResult<Vec<Document>> {
     )))
 }
 
-fn fetch_candidates_from_endpoint(
-    endpoint: &str,
-    index: &str,
-    body: &Value,
+fn decode_candidates(
+    value: &Value,
     score_key: &str,
-    timeout: Duration,
+    limit: usize,
 ) -> Result<Vec<Document>, String> {
-    let url = format!("{}/{}/_search", endpoint.trim_end_matches('/'), index);
-    let value = transport::post_search(&url, body, timeout)?;
     let hits = value
         .pointer("/hits/hits")
         .and_then(Value::as_array)
         .ok_or_else(|| "OpenSearch response missing hits.hits".to_string())?;
+    if hits.len() > limit {
+        return Err(format!(
+            "OpenSearch returned more hits than requested ({} > {limit})",
+            hits.len()
+        ));
+    }
     let mut out = Vec::with_capacity(hits.len());
     for hit in hits {
         let id = hit
@@ -321,11 +526,9 @@ mod tests {
             }
             false
         });
-        let result = fetch_candidates_from_endpoint(
-            &url,
-            "mongodb.demo.items",
+        let result = transport::post_search(
+            &format!("{url}/mongodb.demo.items/_search"),
             &json!({}),
-            "$vectorSearchScore",
             Duration::from_secs(2),
         );
         let followed = server.join().unwrap();
@@ -334,6 +537,57 @@ mod tests {
             !followed,
             "authorization must not be sent to the redirect target"
         );
+    }
+
+    fn hits(n: usize) -> Value {
+        let hits: Vec<Value> = (0..n)
+            .map(|i| json!({"_id": format!("p{i}"), "_score": 1.0}))
+            .collect();
+        json!({"hits": {"hits": hits}})
+    }
+
+    #[test]
+    fn candidates_within_limit_are_decoded() {
+        let docs = decode_candidates(&hits(2), "$vectorSearchScore", 2).unwrap();
+        assert_eq!(
+            docs,
+            vec![
+                doc! {"_id": "p0", "$vectorSearchScore": 1.0},
+                doc! {"_id": "p1", "$vectorSearchScore": 1.0},
+            ]
+        );
+    }
+
+    #[test]
+    fn more_hits_than_limit_is_rejected() {
+        let err = decode_candidates(&hits(3), "$vectorSearchScore", 2).unwrap_err();
+        assert!(err.contains("more hits than requested"), "{err}");
+    }
+
+    #[test]
+    fn request_timeout_without_deadline_uses_default() {
+        let max = Duration::from_millis(DEFAULT_TIMEOUT_MS);
+        assert_eq!(request_timeout(None, 1_000, max).unwrap(), max);
+        assert_eq!(request_timeout(Some(i64::MAX), 1_000, max).unwrap(), max);
+        assert_eq!(request_timeout(Some(60_000), 1_000, max).unwrap(), max);
+    }
+
+    #[test]
+    fn request_timeout_is_capped_by_query_deadline() {
+        let max = Duration::from_millis(DEFAULT_TIMEOUT_MS);
+        assert_eq!(
+            request_timeout(Some(1_500), 1_000, max).unwrap(),
+            Duration::from_millis(500)
+        );
+    }
+
+    #[test]
+    fn request_timeout_rejects_expired_deadline() {
+        let max = Duration::from_millis(DEFAULT_TIMEOUT_MS);
+        for deadline in [1_000, 999, i64::MIN] {
+            let err = request_timeout(Some(deadline), 1_000, max).unwrap_err();
+            assert!(err.to_string().contains("deadline"), "{err}");
+        }
     }
 
     #[test]
@@ -379,6 +633,72 @@ mod tests {
             doc! { "path": "description", "query": "boots", "limit": 1001i32 }
         )
         .is_err());
+    }
+
+    fn with_filter(filter: impl Into<Bson>) -> ExtensionResult<QueryArgs> {
+        parse_vector_search_args(doc! { "path": "description", "query": "boots", "filter": filter })
+    }
+
+    #[test]
+    fn filter_accepts_allowlisted_clauses() {
+        for filter in [
+            doc! { "term": { "category": "bags" } },
+            doc! { "term": { "category": { "value": "bags" } } },
+            doc! { "terms": { "category": ["bags", "boots"] } },
+            doc! { "ids": { "values": ["p007"] } },
+            doc! { "exists": { "field": "price" } },
+            doc! { "range": { "price": { "gte": 10, "lt": 99.5 } } },
+            doc! { "bool": {
+                "must": [{ "term": { "category": "bags" } }],
+                "filter": { "range": { "price": { "lte": 50 } } },
+                "should": [{ "terms": { "tags": ["rain"] } }],
+                "must_not": [{ "ids": { "values": ["p001"] } }],
+                "minimum_should_match": 1,
+            } },
+        ] {
+            assert!(with_filter(filter.clone()).is_ok(), "{filter}");
+        }
+    }
+
+    #[test]
+    fn filter_rejects_dangerous_or_unknown_clauses() {
+        for filter in [
+            doc! { "script": { "script": { "source": "Thread.sleep(10000)" } } },
+            doc! { "terms": { "category": { "index": "secrets", "id": "1", "path": "x" } } },
+            doc! { "more_like_this": { "like": [{ "_index": "secrets", "_id": "1" }] } },
+            doc! { "regexp": { "name": ".*(a+)+.*" } },
+            doc! { "wildcard": { "name": "*a*" } },
+            doc! { "query_string": { "query": "*" } },
+            doc! { "bool": { "must": [{ "script": { "script": "1" } }] } },
+            doc! { "bool": { "boost": 2 } },
+            doc! { "term": { "category": "bags" }, "ids": { "values": ["x"] } },
+            doc! { "term": { "_index": "secrets" } },
+            doc! { "term": { "category": { "value": { "nested": 1 } } } },
+            doc! { "range": { "price": { "gte": 1, "script": "x" } } },
+            doc! {},
+        ] {
+            assert!(with_filter(filter.clone()).is_err(), "{filter}");
+        }
+    }
+
+    #[test]
+    fn filter_rejects_excessive_nesting() {
+        let mut filter = doc! { "term": { "category": "bags" } };
+        for _ in 0..MAX_FILTER_DEPTH {
+            filter = doc! { "bool": { "filter": [filter] } };
+        }
+        assert!(with_filter(filter).is_err());
+    }
+
+    #[test]
+    fn filter_must_be_a_document_not_silently_ignored() {
+        for filter in [
+            Bson::String("category:bags".into()),
+            Bson::Array(vec![]),
+            Bson::Int32(1),
+        ] {
+            assert!(with_filter(filter.clone()).is_err(), "{filter}");
+        }
     }
 
     #[test]
@@ -502,5 +822,111 @@ mod tests {
         };
         assert_eq!(document, doc! { "_id": "p003" });
         assert_eq!(metadata, Some(doc! { "$vectorSearchScore": 0.75 }));
+    }
+
+    pub(crate) const INTERRUPTED: i32 = 11601;
+
+    /// Host that reports the operation as killed once `killed` is set.
+    pub(crate) struct KillableQuery(pub(crate) std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl QueryControl for KillableQuery {
+        fn check_interrupt(&mut self) -> ExtensionResult<()> {
+            if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(ExtensionError::HostError {
+                    code: INTERRUPTED,
+                    reason: "operation was interrupted".into(),
+                });
+            }
+            Ok(())
+        }
+
+        fn deadline_timestamp_ms(&mut self) -> ExtensionResult<Option<i64>> {
+            Ok(None)
+        }
+    }
+
+    /// Accepts one request, marks the operation killed, then answers with `response` (or drops
+    /// the connection when `None`). Returns the endpoint URL and the kill flag.
+    pub(crate) fn serve_then_kill(
+        response: Option<String>,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let killed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&killed);
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            let length: usize = String::from_utf8_lossy(&request)
+                .lines()
+                .find_map(|l| {
+                    let (name, value) = l.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse().unwrap())
+                })
+                .unwrap_or(0);
+            stream.read_exact(&mut vec![0; length]).unwrap();
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(body) = response {
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+        });
+        (endpoint, killed, worker)
+    }
+
+    fn state_for(endpoint: String) -> SearchState {
+        SearchState {
+            args: parse_vector_search_args(doc! { "path": "description", "query": "rain" })
+                .unwrap(),
+            index: "mongodb.shop.items".to_string(),
+            config: OpenSearchConfig {
+                endpoints: vec![endpoint],
+            },
+            timeout: Duration::from_secs(5),
+            pending: VecDeque::new(),
+            loaded: false,
+        }
+    }
+
+    fn interrupted() -> ExtensionError {
+        ExtensionError::HostError {
+            code: INTERRUPTED,
+            reason: "operation was interrupted".into(),
+        }
+    }
+
+    #[test]
+    fn interrupt_during_successful_request_discards_results() {
+        let (endpoint, killed, worker) = serve_then_kill(Some(hits(1).to_string()));
+        let result = fetch_candidates(&state_for(endpoint), &mut KillableQuery(killed));
+        worker.join().unwrap();
+        assert_eq!(result, Err(interrupted()));
+    }
+
+    #[test]
+    fn interrupt_during_failed_request_keeps_host_code() {
+        let (endpoint, killed, worker) = serve_then_kill(None);
+        let result = fetch_candidates(&state_for(endpoint), &mut KillableQuery(killed));
+        worker.join().unwrap();
+        assert_eq!(result, Err(interrupted()));
     }
 }
