@@ -180,7 +180,10 @@ fn decode_response(value: Value, limit: usize) -> ExtensionResult<Vec<(Document,
     hits.iter().map(decode_hit).collect()
 }
 
-fn fetch(state: &SearchState, ctx: &mut StageContext) -> ExtensionResult<Vec<(Document, f64)>> {
+fn fetch(
+    state: &SearchState,
+    ctx: &mut impl crate::QueryControl,
+) -> ExtensionResult<Vec<(Document, f64)>> {
     let body = opensearch_body(&state.args);
     let mut errors = Vec::new();
     for endpoint in &state.config.endpoints {
@@ -190,7 +193,9 @@ fn fetch(state: &SearchState, ctx: &mut StageContext) -> ExtensionResult<Vec<(Do
             endpoint.trim_end_matches('/'),
             state.index
         );
-        match crate::transport::post_search(&url, &body, timeout) {
+        let response = crate::transport::post_search(&url, &body, timeout);
+        ctx.check_interrupt()?;
+        match response {
             Ok(response) => return decode_response(response, state.args.limit as usize),
             Err(e) => errors.push(format!("{endpoint}: {e}")),
         }
@@ -525,5 +530,46 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("All OpenSearch endpoints failed"));
+    }
+
+    fn state_for(endpoint: String) -> SearchState {
+        SearchState {
+            args: RouterVectorSearch::parse(doc! {"path": "description", "query": "rain"}).unwrap(),
+            index: "mongodb.shop.items".into(),
+            config: OpenSearchConfig {
+                endpoints: vec![endpoint],
+            },
+            rows: None,
+        }
+    }
+
+    fn interrupted() -> ExtensionError {
+        ExtensionError::HostError {
+            code: crate::tests::INTERRUPTED,
+            reason: "operation was interrupted".into(),
+        }
+    }
+
+    #[test]
+    fn interrupt_during_successful_request_discards_results() {
+        let response = json!({"hits": {"hits": [hit(doc! {"_id": 7i64})]}}).to_string();
+        let (endpoint, killed, worker) = crate::tests::serve_then_kill(Some(response));
+        let result = fetch(
+            &state_for(endpoint),
+            &mut crate::tests::KillableQuery(killed),
+        );
+        worker.join().unwrap();
+        assert_eq!(result, Err(interrupted()));
+    }
+
+    #[test]
+    fn interrupt_during_failed_request_keeps_host_code() {
+        let (endpoint, killed, worker) = crate::tests::serve_then_kill(None);
+        let result = fetch(
+            &state_for(endpoint),
+            &mut crate::tests::KillableQuery(killed),
+        );
+        worker.join().unwrap();
+        assert_eq!(result, Err(interrupted()));
     }
 }

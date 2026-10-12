@@ -343,9 +343,25 @@ pub fn request_timeout(
     Ok(max.min(Duration::from_millis(remaining as u64)))
 }
 
+/// Host interrupt and deadline checks consulted around each OpenSearch request.
+pub(crate) trait QueryControl {
+    fn check_interrupt(&mut self) -> ExtensionResult<()>;
+    fn deadline_timestamp_ms(&mut self) -> ExtensionResult<Option<i64>>;
+}
+
+impl QueryControl for StageContext {
+    fn check_interrupt(&mut self) -> ExtensionResult<()> {
+        StageContext::check_interrupt(self)
+    }
+
+    fn deadline_timestamp_ms(&mut self) -> ExtensionResult<Option<i64>> {
+        StageContext::deadline_timestamp_ms(self)
+    }
+}
+
 /// Checks for interrupts and returns the timeout for the next OpenSearch attempt.
 pub(crate) fn next_attempt_timeout(
-    ctx: &mut StageContext,
+    ctx: &mut impl QueryControl,
     max: Duration,
 ) -> ExtensionResult<Duration> {
     ctx.check_interrupt()?;
@@ -393,20 +409,21 @@ pub fn next_result(state: &mut SearchState, ctx: &mut StageContext) -> Extension
     }
 }
 
-fn fetch_candidates(state: &SearchState, ctx: &mut StageContext) -> ExtensionResult<Vec<Document>> {
+fn fetch_candidates(
+    state: &SearchState,
+    ctx: &mut impl QueryControl,
+) -> ExtensionResult<Vec<Document>> {
     let body = opensearch_body(&state.args);
     let score_key = "$vectorSearchScore";
     let mut last_error = None;
     for endpoint in &state.config.endpoints {
         let timeout = next_attempt_timeout(ctx, state.timeout)?;
-        match fetch_candidates_from_endpoint(
-            endpoint,
-            &state.index,
-            &body,
-            score_key,
-            state.args.limit as usize,
-            timeout,
-        ) {
+        let url = format!("{}/{}/_search", endpoint.trim_end_matches('/'), state.index);
+        let response = transport::post_search(&url, &body, timeout);
+        ctx.check_interrupt()?;
+        match response
+            .and_then(|value| decode_candidates(&value, score_key, state.args.limit as usize))
+        {
             Ok(documents) => return Ok(documents),
             Err(err) => last_error = Some(err),
         }
@@ -415,19 +432,6 @@ fn fetch_candidates(state: &SearchState, ctx: &mut StageContext) -> ExtensionRes
         "all OpenSearch endpoints failed: {}",
         last_error.unwrap_or_else(|| "no endpoint attempted".to_string())
     )))
-}
-
-fn fetch_candidates_from_endpoint(
-    endpoint: &str,
-    index: &str,
-    body: &Value,
-    score_key: &str,
-    limit: usize,
-    timeout: Duration,
-) -> Result<Vec<Document>, String> {
-    let url = format!("{}/{}/_search", endpoint.trim_end_matches('/'), index);
-    let value = transport::post_search(&url, body, timeout)?;
-    decode_candidates(&value, score_key, limit)
 }
 
 fn decode_candidates(
@@ -522,12 +526,9 @@ mod tests {
             }
             false
         });
-        let result = fetch_candidates_from_endpoint(
-            &url,
-            "mongodb.demo.items",
+        let result = transport::post_search(
+            &format!("{url}/mongodb.demo.items/_search"),
             &json!({}),
-            "$vectorSearchScore",
-            10,
             Duration::from_secs(2),
         );
         let followed = server.join().unwrap();
@@ -821,5 +822,111 @@ mod tests {
         };
         assert_eq!(document, doc! { "_id": "p003" });
         assert_eq!(metadata, Some(doc! { "$vectorSearchScore": 0.75 }));
+    }
+
+    pub(crate) const INTERRUPTED: i32 = 11601;
+
+    /// Host that reports the operation as killed once `killed` is set.
+    pub(crate) struct KillableQuery(pub(crate) std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl QueryControl for KillableQuery {
+        fn check_interrupt(&mut self) -> ExtensionResult<()> {
+            if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(ExtensionError::HostError {
+                    code: INTERRUPTED,
+                    reason: "operation was interrupted".into(),
+                });
+            }
+            Ok(())
+        }
+
+        fn deadline_timestamp_ms(&mut self) -> ExtensionResult<Option<i64>> {
+            Ok(None)
+        }
+    }
+
+    /// Accepts one request, marks the operation killed, then answers with `response` (or drops
+    /// the connection when `None`). Returns the endpoint URL and the kill flag.
+    pub(crate) fn serve_then_kill(
+        response: Option<String>,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let killed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&killed);
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            let length: usize = String::from_utf8_lossy(&request)
+                .lines()
+                .find_map(|l| {
+                    let (name, value) = l.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse().unwrap())
+                })
+                .unwrap_or(0);
+            stream.read_exact(&mut vec![0; length]).unwrap();
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(body) = response {
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+        });
+        (endpoint, killed, worker)
+    }
+
+    fn state_for(endpoint: String) -> SearchState {
+        SearchState {
+            args: parse_vector_search_args(doc! { "path": "description", "query": "rain" })
+                .unwrap(),
+            index: "mongodb.shop.items".to_string(),
+            config: OpenSearchConfig {
+                endpoints: vec![endpoint],
+            },
+            timeout: Duration::from_secs(5),
+            pending: VecDeque::new(),
+            loaded: false,
+        }
+    }
+
+    fn interrupted() -> ExtensionError {
+        ExtensionError::HostError {
+            code: INTERRUPTED,
+            reason: "operation was interrupted".into(),
+        }
+    }
+
+    #[test]
+    fn interrupt_during_successful_request_discards_results() {
+        let (endpoint, killed, worker) = serve_then_kill(Some(hits(1).to_string()));
+        let result = fetch_candidates(&state_for(endpoint), &mut KillableQuery(killed));
+        worker.join().unwrap();
+        assert_eq!(result, Err(interrupted()));
+    }
+
+    #[test]
+    fn interrupt_during_failed_request_keeps_host_code() {
+        let (endpoint, killed, worker) = serve_then_kill(None);
+        let result = fetch_candidates(&state_for(endpoint), &mut KillableQuery(killed));
+        worker.join().unwrap();
+        assert_eq!(result, Err(interrupted()));
     }
 }

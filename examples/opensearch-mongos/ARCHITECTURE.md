@@ -110,7 +110,8 @@ The extension continues to decode candidates from OpenSearch `_id` itself.
 
 Extension options contain only comma-separated OpenSearch endpoints. The demo
 has one; multiple endpoints are tried in configured order with a two-second
-HTTP timeout per attempt. Interrupts are checked between attempts. When all
+HTTP timeout per attempt. Interrupts are checked before and after each request,
+and a killed operation fails with the host's error code. When all
 endpoints fail, aggregation fails rather than returning an empty successful result.
 Malformed candidate keys and partial/timed-out OpenSearch responses are errors.
 There is no background heartbeat/circuit breaker in this version; an unreachable

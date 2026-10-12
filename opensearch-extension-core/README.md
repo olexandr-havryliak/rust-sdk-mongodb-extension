@@ -24,9 +24,11 @@ Field names must not start with `_`. Nesting is limited to 8 levels and 256
 clauses. Scripts, terms lookups, `more_like_this`, and pattern queries such as
 `regexp`, `wildcard`, and `query_string` are not available.
 
-Each OpenSearch attempt checks for MongoDB interrupts and uses a timeout of at
-most 2 seconds, shortened to the query deadline (`maxTimeMS`). Responses larger
-than 4 MiB, or with more hits than `limit`, are rejected.
+Each OpenSearch attempt checks for MongoDB interrupts before sending the request
+and again before using its result, and uses a timeout of at most 2 seconds,
+shortened to the query deadline (`maxTimeMS`). A killed operation fails with the
+host's error code. Responses larger than 4 MiB, or with more hits than `limit`,
+are rejected.
 
 Each example owns its ABI wrapper, library name, Docker build, deployment,
 configuration, scripts, datasets and tests. The core owns the shared behavior

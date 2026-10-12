@@ -118,7 +118,8 @@ HA or permanent stale-write safety.
 
 The extension accepts multiple OpenSearch endpoints and tries them with bounded
 request timeouts, capped by the query deadline, and checks for MongoDB
-interrupts before each attempt. Failure of every endpoint returns an error. Background
+interrupts before and after each attempt, keeping the host's error code. Failure of
+every endpoint returns an error. Background
 heartbeats are not implemented. See [CONNECTOR.md](../../examples/opensearch/CONNECTOR.md)
 for detailed ordering and recovery limits.
 
