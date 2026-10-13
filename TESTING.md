@@ -16,7 +16,8 @@ bash ./run-workflows-local.sh
 
 This runs every GitHub workflow's checks in order: formatting, Clippy,
 unit/property/doc tests, dependency audit, C ABI/UBSan, ASan, the standard SDK
-test script, MongoDB e2e plus aggregation fuzz, and Miri. Checks never overlap.
+test script, MongoDB e2e plus aggregation fuzz, SDK benchmarks, sequential
+replica-set/mongos load tests, and Miri. Checks never overlap.
 The pinned testing image is built once. A failed check does not skip later
 checks; the final exit status is nonzero if any check failed. An image build
 failure stops the run before checks start.
@@ -54,6 +55,8 @@ bash .github/testing/abi.sh
 bash .github/testing/asan.sh
 bash .github/testing/sdk.sh
 bash .github/testing/e2e.sh
+bash .github/testing/bench.sh
+bash .github/testing/load.sh
 bash .github/testing/miri.sh
 ```
 
@@ -66,13 +69,15 @@ workflow wrapper; override with `ITERATIONS`.
 | Check | Scope | Output |
 |---|---|---|
 | Formatting | Entire Rust workspace, including examples | Result and rustfmt diff in logs; no JUnit |
-| Clippy | SDK, sys, ABI fixture; all targets; warnings are errors | Cargo JSON diagnostics and JUnit |
+| Clippy | SDK, sys, ABI/performance fixtures and driver; all targets; warnings are errors | Cargo JSON diagnostics and JUnit |
 | Unit/property | Entire workspace, doc tests, runner/report/workflow regression tests | Native nextest JUnit and command-level JUnit |
 | Audit | Workspace lockfile against RustSec advisories | Audit JSON and JUnit |
 | C ABI/UBSan | C header versus Rust layouts and C-to-Rust lifecycle | JUnit and C UBSan diagnostics |
-| ASan | SDK/sys/fixture tests and C/Rust FFI harness | Native nextest JUnit, harness JUnit and ASan diagnostics |
+| ASan | SDK/sys/ABI/performance fixture tests and C/Rust FFI harness | Native nextest JUnit, harness JUnit and ASan diagnostics |
 | Standard SDK | `cargo test --workspace`, including doc tests | Console logs |
 | E2e/fuzz | MongoDB extension load and randomized aggregation driver | Console logs |
+| Benchmarks | Criterion timing, Callgrind instructions, DHAT allocations | JSON/HTML/profiles; execution JUnit, no latency gate |
+| Load | Real MongoDB replica-set and mongos source/map workloads and interruption controls | JSON/CSV, resource samples and correctness JUnit |
 | Miri | SDK library and selected integration tests | Console logs |
 
 Testing logs and reports are in `reports/<check>/`. Missing or malformed native
@@ -113,12 +118,12 @@ prove compatibility with every CPU architecture, glibc version or MongoDB setup.
 Six independent testing workflows run on PRs to `main`, pushes to `main`
 and manual dispatch:
 
-- [Formatting](.github/workflows/testing-fmt.yml)
-- [Clippy](.github/workflows/testing-clippy.yml)
-- [Unit/property tests](.github/workflows/testing-tests.yml)
-- [Dependency audit](.github/workflows/testing-audit.yml)
-- [C ABI/UBSan](.github/workflows/testing-abi.yml)
-- [ASan](.github/workflows/testing-asan.yml)
+- [Formatting](.github/workflows/fmt.yml)
+- [Clippy](.github/workflows/clippy.yml)
+- [Unit/property tests](.github/workflows/tests.yml)
+- [Dependency audit](.github/workflows/audit.yml)
+- [C ABI/UBSan](.github/workflows/abi.yml)
+- [ASan](.github/workflows/asan.yml)
 
 Each has its own status and job, using the shared
 [composite action](.github/actions/run-check/action.yml) for Docker execution,
@@ -141,6 +146,11 @@ The existing [MongoDB e2e/fuzzer workflow](.github/workflows/e2e.yml) and
 [Miri workflow](.github/workflows/miri.yml) remain independent. Their entrypoints
 are also under `.github/testing`; domain fixtures and standalone scripts remain
 in `e2e-tests`.
+
+The independent benchmark and load workflows run short PR checks and longer
+scheduled/manual checks on shared runners. Numeric measurements are artifacts,
+not hard timing gates. See [PERFORMANCE.md](PERFORMANCE.md) for commands,
+workloads, baseline comparisons and interpretation.
 
 ## Server Integration And Debugging
 

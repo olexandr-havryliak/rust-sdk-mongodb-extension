@@ -12,6 +12,10 @@ import runner
 
 
 class RunnerTests(unittest.TestCase):
+    def test_performance_fixtures_are_linted_and_sanitized_with_the_sdk(self):
+        for package in ("sdk_benchmarks", "sdk_performance_fixture", "sdk_load_test"):
+            self.assertIn(package, runner.PACKAGES)
+
     def test_fmt_emits_logs_only_and_removes_stale_reports(self):
         with tempfile.TemporaryDirectory() as directory:
             report = Path(directory) / "reports/fmt"

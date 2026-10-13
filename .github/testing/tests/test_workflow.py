@@ -12,7 +12,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 CHECKS = ("fmt", "clippy", "tests", "audit", "abi", "asan")
-ALL_CHECKS = (*CHECKS, "sdk", "e2e", "miri")
+ALL_CHECKS = (*CHECKS, "sdk", "e2e", "bench", "load", "miri")
 
 
 def load(path):
@@ -20,10 +20,30 @@ def load(path):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_performance_workflows_publish_correctness_without_write_permissions(self):
+        for name in ("bench", "load"):
+            workflow = load(ROOT / f".github/workflows/{name}.yml")
+            self.assertEqual(workflow["permissions"], {"contents": "read"})
+            self.assertIn("schedule", workflow["on"])
+            job = workflow["jobs"]["check"]
+            self.assertEqual(job["runs-on"], "ubuntu-24.04")
+            self.assertLessEqual(int(job["timeout-minutes"]), 60)
+            steps = job["steps"]
+            command = next(step for step in steps if step.get("id") == "run")
+            self.assertIn(f".github/testing/{name}.sh", command["run"])
+            publisher = next(step for step in steps if "publish-unit-test-result-action" in step.get("uses", ""))
+            self.assertEqual(publisher["uses"], "EnricoMi/publish-unit-test-result-action@v2")
+            self.assertIn("!cancelled()", publisher["if"])
+            for key, value in {"check_run": "false", "comment_mode": "off", "compare_to_earlier_commit": "false",
+                               "action_fail": "true", "action_fail_on_inconclusive": "true"}.items():
+                self.assertEqual(publisher["with"][key], value)
+            artifact = next(step for step in steps if step.get("uses") == "actions/upload-artifact@v4")
+            self.assertIn("always()", artifact["if"])
+
     def test_six_independent_workflows_use_local_entrypoints(self):
         self.assertEqual(
             {path.stem for path in (ROOT / ".github/workflows").glob("*.yml")},
-            {*CHECKS, "e2e", "miri"},
+            {*CHECKS, "e2e", "miri", "bench", "load"},
         )
         for check in CHECKS:
             with self.subTest(check=check):

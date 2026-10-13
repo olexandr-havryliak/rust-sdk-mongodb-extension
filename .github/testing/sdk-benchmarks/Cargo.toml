@@ -1,0 +1,23 @@
+[package]
+name = "sdk_benchmarks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Isolated ABI and allocation benchmarks for the Rust SDK for MongoDB Extensions"
+
+[dependencies]
+bson = "2.15"
+extension-sdk-mongodb = { path = "../../../extension-sdk-mongodb" }
+sdk_performance_fixture = { path = "../../../e2e-tests/performance/fixture" }
+
+[dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
+gungraun = "0.20"
+
+[[bench]]
+name = "timing"
+harness = false
+
+[[bench]]
+name = "instructions"
+harness = false

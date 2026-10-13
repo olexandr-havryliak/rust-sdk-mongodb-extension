@@ -1,0 +1,7 @@
+FROM rust:1.98.1-trixie
+ENV CARGO_BUILD_JOBS=2 PYTHONDONTWRITEBYTECODE=1
+RUN apt-get update && apt-get install -y --no-install-recommends valgrind python3 gnuplot-nox \
+    && rm -rf /var/lib/apt/lists/*
+RUN cargo install gungraun-runner --version 0.20.0 --locked
+RUN rustup component add rustfmt clippy
+WORKDIR /build

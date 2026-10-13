@@ -1,0 +1,57 @@
+name: SDK MongoDB load tests
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**/*.md']
+  pull_request:
+    branches: [main]
+    paths-ignore: ['**/*.md']
+  workflow_dispatch:
+    inputs:
+      soak_seconds:
+        description: Additional soak seconds per topology (0 disables soak)
+        type: string
+        default: '0'
+  schedule:
+    - cron: '0 3 * * 2'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-load-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: run
+        name: Replica set then mongos
+        env:
+          LOAD_CONCURRENCY: ${{ github.event_name == 'pull_request' && '1,4' || '1,4,16,64' }}
+          LOAD_REQUESTS: ${{ github.event_name == 'pull_request' && '2' || '8' }}
+          LOAD_SOAK_SECONDS: ${{ github.event_name == 'schedule' && '900' || inputs.soak_seconds || '0' }}
+        run: bash .github/testing/load.sh all
+      - name: Publish correctness and stress checks
+        if: ${{ !cancelled() }}
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        with:
+          files: reports/performance/load/**/*.xml
+          check_run: false
+          comment_mode: off
+          compare_to_earlier_commit: false
+          action_fail: true
+          action_fail_on_inconclusive: true
+      - name: Preserve measurements and logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-mongodb-load
+          path: reports/performance/load/
+          retention-days: 14

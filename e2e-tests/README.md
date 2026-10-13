@@ -52,6 +52,8 @@ chmod +x e2e-tests/run-sdk-tests-docker.sh
 
 **All CI checks, sequentially:** `bash ./run-workflows-local.sh`.
 See [TESTING.md](../TESTING.md) for individual checks and reports.
+See [PERFORMANCE.md](../PERFORMANCE.md) for SDK/ABI microbenchmarks and
+deterministic load/stress tests on replica-set and mongos stacks.
 
 Override the toolchain image: **`RUST_TEST_IMAGE=my-registry/rust:nightly ./e2e-tests/run-sdk-tests-docker.sh`**.
 
