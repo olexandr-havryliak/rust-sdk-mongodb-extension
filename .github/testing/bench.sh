@@ -13,12 +13,23 @@ image=${BENCH_IMAGE:-sdk-performance-tools:local}
 report="$ROOT/reports/performance/bench"
 mkdir -p "$report"
 archive=
+benchmark_started=
 cleanup() {
   local rc=$?
   if [[ -n "$archive" ]]; then rm -f "$archive"; fi
   if [[ "$rc" -ne 0 && ! -e "$report/checks.xml" ]]; then
     docker run --rm --network none -v "$ROOT:/build" -w /build python:3.11-slim \
       python .github/testing/performance_reports.py reports/performance/bench --setup-failure "benchmark launcher exited $rc" || true
+  fi
+  # Valgrind writes Callgrind output mode 0600 as root. Artifact upload runs as the host user.
+  if [[ -n "$benchmark_started" ]]; then
+    if ! docker run --rm --network none \
+        -e LOCAL_UID="$(id -u)" -e LOCAL_GID="$(id -g)" \
+        -v "$ROOT:/build" "$image" \
+        bash -c 'chmod -R a+rX /build/reports/performance/bench; chown -R "$LOCAL_UID:$LOCAL_GID" /build/reports/performance/bench'; then
+      echo "Failed to make benchmark reports readable by the host user" >&2
+      if [[ "$rc" -eq 0 ]]; then rc=1; fi
+    fi
   fi
   exit "$rc"
 }
@@ -37,6 +48,7 @@ if [[ -n "${BASE_REF:-}" ]]; then
   args=(--base-archive /baseline.tar)
 fi
 HEAD_REF=$(git rev-parse HEAD)
+benchmark_started=1
 docker run --rm --cpus 2 --memory 3g -e CARGO_BUILD_JOBS=2 \
   -e "BENCH_QUICK=${BENCH_QUICK:-0}" -e "BASE_REF=${BASE_REF:-}" -e "HEAD_REF=$HEAD_REF" \
   -v "$ROOT:/build" "${mounts[@]}" -w /build "$image" \

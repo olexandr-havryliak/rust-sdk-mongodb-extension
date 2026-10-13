@@ -99,6 +99,13 @@ esac
         self.assertIn("--baseline=base", command)
         self.assertNotIn("seccomp=unconfined", (ROOT / ".github/testing/bench.sh").read_text())
 
+    def test_benchmark_reports_are_readable_by_the_host_before_upload(self):
+        script = (ROOT / ".github/testing/bench.sh").read_text()
+        self.assertIn('LOCAL_UID="$(id -u)"', script)
+        self.assertIn('LOCAL_GID="$(id -g)"', script)
+        self.assertIn("chmod -R a+rX /build/reports/performance/bench", script)
+        self.assertIn('chown -R "$LOCAL_UID:$LOCAL_GID" /build/reports/performance/bench', script)
+
     def test_only_router_loads_extensions_in_sharded_stack(self):
         config = json.loads((ROOT / "e2e-tests/performance/mongos.json").read_text())
         for name in ("config", "shard0", "shard1"):
@@ -114,6 +121,12 @@ esac
         self.assertIn("down -v --remove-orphans", script)
         self.assertIn("replica-set|mongos", script)
         self.assertNotIn("LATENCY_THRESHOLD", script)
+
+    def test_mongodb_image_is_pulled_before_build_and_inspect(self):
+        script = (ROOT / ".github/testing/load.sh").read_text()
+        pull = script.index('docker pull "$MONGO_IMAGE"')
+        self.assertLess(pull, script.index('"${COMPOSE[@]}" build'))
+        self.assertLess(pull, script.index('docker image inspect "$MONGO_IMAGE"'))
 
 
 if __name__ == "__main__":

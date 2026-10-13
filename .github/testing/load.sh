@@ -41,6 +41,8 @@ fi
 mkdir -p "$report"
 rm -f "$report/checks.xml" "$report/setup.xml" "$report/load.json" "$report/resources.jsonl" "$report/processes.jsonl"
 trap cleanup EXIT
+# BuildKit can consume the base image without tagging it locally, so inspect would fail.
+docker pull "$MONGO_IMAGE"
 "${COMPOSE[@]}" build
 wait_for() {
   local service=$1 expression=$2
