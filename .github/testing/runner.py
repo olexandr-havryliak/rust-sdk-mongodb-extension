@@ -14,7 +14,8 @@ import xml.etree.ElementTree as ET
 from reports import Case, audit_cases, diagnostic_cases, write_junit
 
 ROOT = Path(__file__).resolve().parents[2]
-PACKAGES = ["-p", "extension-sdk-mongodb", "-p", "extension-sys-mongodb", "-p", "sdk_abi_harness"]
+PACKAGES = ["-p", "extension-sdk-mongodb", "-p", "extension-sys-mongodb", "-p", "sdk_abi_harness",
+            "-p", "sdk_benchmarks", "-p", "sdk_performance_fixture", "-p", "sdk_load_test"]
 NIGHTLY = "+nightly-2026-10-01"
 TARGET = "x86_64-unknown-linux-gnu"
 # nextest's default store is workspace-relative, independent of CARGO_TARGET_DIR.

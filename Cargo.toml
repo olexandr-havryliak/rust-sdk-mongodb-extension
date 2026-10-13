@@ -6,7 +6,10 @@ members = [
     "e2e-tests/e2e-extension",
     "e2e-tests/router-lookup-extension",
     ".github/testing/abi-harness",
+    ".github/testing/sdk-benchmarks",
     "e2e-tests/mongo-extension-fuzz",
+    "e2e-tests/performance/fixture",
+    "e2e-tests/performance/driver",
     "examples/fibonacci/fibonacci-extension",
     "examples/http-fetch/http-fetch-extension",
     "examples/data-federation/data-federation-extension",
@@ -23,3 +26,6 @@ edition = "2021"
 license = "MIT"
 repository = "https://github.com/olexandr-havryliak/rust-sdk-mongodb-extension"
 description = "Rust SDK for MongoDB Extensions (workspace: SDK crates, examples, tests)"
+
+[profile.bench]
+debug = 1

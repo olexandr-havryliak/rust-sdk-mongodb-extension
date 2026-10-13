@@ -1,0 +1,19 @@
+[package]
+name = "sdk_performance_fixture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Deterministic SDK performance fixtures, never for production loading"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["source"]
+source = []
+transform = []
+router = []
+
+[dependencies]
+bson = "2.15"
+extension-sdk-mongodb = { path = "../../../extension-sdk-mongodb" }

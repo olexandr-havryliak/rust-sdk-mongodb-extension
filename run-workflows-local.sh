@@ -9,7 +9,7 @@ fi
 export TESTING_BUILD_IMAGE=0
 export RUST_TEST_IMAGE="${RUST_TEST_IMAGE:-${TESTING_IMAGE:-rust-sdk-testing:local}}"
 failed=0
-for check in fmt clippy tests audit abi asan sdk e2e miri; do
+for check in fmt clippy tests audit abi asan sdk e2e bench load miri; do
   echo "==> $check"
   if bash ".github/testing/$check.sh"; then
     echo "==> $check passed"

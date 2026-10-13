@@ -1,0 +1,69 @@
+{
+  "services": {
+    "mongo": {
+      "image": "sdk-performance-mongo:local",
+      "entrypoint": [
+        "mongod"
+      ],
+      "command": [
+        "--replSet",
+        "perf",
+        "--bind_ip_all",
+        "--wiredTigerCacheSizeGB",
+        "0.25",
+        "--setParameter",
+        "featureFlagExtensionsAPI=true",
+        "--setParameter",
+        "featureFlagExtensionsApiSignatureValidation=false",
+        "--extensionsConfigPath",
+        "/etc/mongo/extensions",
+        "--loadExtensions",
+        "perf_source,perf_transform"
+      ],
+      "cpus": 2,
+      "mem_limit": "1g",
+      "environment": {
+        "RS_NAME": "perf",
+        "RS_HOST": "mongo:27017",
+        "RS_CONFIG": "false"
+      },
+      "volumes": [
+        "./scripts:/scripts:ro"
+      ],
+      "build": {
+        "context": "../..",
+        "dockerfile": "e2e-tests/performance/Dockerfile",
+        "target": "replica-set",
+        "args": {
+          "MONGO_IMAGE": "${MONGO_IMAGE:-mongodb/mongodb-community-server:9.0-ubi9}"
+        }
+      }
+    },
+    "driver": {
+      "image": "sdk-performance-driver:local",
+      "build": {
+        "context": "../..",
+        "dockerfile": "e2e-tests/performance/Dockerfile",
+        "target": "driver",
+        "args": {
+          "MONGO_IMAGE": "${MONGO_IMAGE:-mongodb/mongodb-community-server:9.0-ubi9}"
+        }
+      },
+      "cpus": 2,
+      "mem_limit": "1g",
+      "environment": {
+        "MONGODB_URI": "mongodb://mongo:27017/?replicaSet=perf",
+        "LOAD_TOPOLOGY": "${LOAD_TOPOLOGY}",
+        "LOAD_CONCURRENCY": "${LOAD_CONCURRENCY:-1,4,16,64}",
+        "LOAD_REQUESTS": "${LOAD_REQUESTS:-8}",
+        "LOAD_WARMUP": "${LOAD_WARMUP:-2}",
+        "LOAD_TARGET_RPS": "${LOAD_TARGET_RPS:-0}",
+        "LOAD_SOAK_SECONDS": "${LOAD_SOAK_SECONDS:-0}",
+        "REPORT_DIR": "/reports"
+      },
+      "volumes": [
+        "../../reports/performance/load/${LOAD_TOPOLOGY}:/reports"
+      ]
+    }
+  }
+}
